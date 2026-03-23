@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image to 3D</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #0a0a0b;
+      --surface:   #111114;
+      --border:    #222228;
+      --border-hi: #3a3a48;
+      --accent:    #7c6af7;
+      --accent-lo: #7c6af720;
+      --accent-hi: #a89bff;
+      --text:      #e2e2ec;
+      --muted:     #6b6b82;
+      --ok:        #4ade80;
+      --err:       #f87171;
+      --mono:      'Share Tech Mono', monospace;
+      --sans:      'Barlow', sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--bg);
+    }
+
+    .logo {
+      font-family: var(--mono);
+      font-size: 1rem;
+      letter-spacing: 0.12em;
+      color: var(--accent-hi);
+    }
+
+    .logo span { color: var(--muted); }
+
+    #device-badge {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+      padding: 3px 10px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      letter-spacing: 0.08em;
+    }
+
+    #device-badge.gpu { color: var(--ok); border-color: var(--ok); }
+
+    /* ── Layout ── */
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 0;
+      max-height: calc(100vh - 56px);
+    }
+
+    /* ── Left Panel ── */
+    .panel-left {
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .section {
+      padding: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Drop Zone ── */
+    #drop-zone {
+      border: 1px dashed var(--border-hi);
+      border-radius: 4px;
+      aspect-ratio: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    #drop-zone:hover, #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-lo);
+    }
+
+    #drop-zone .drop-icon {
+      font-size: 2rem;
+      opacity: 0.3;
+    }
+
+    #drop-zone .drop-text {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    #drop-zone .drop-hint {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--border-hi);
+    }
+
+    #preview-img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+
+    /* ── Settings ── */
+    .field {
+      margin-bottom: 1.25rem;
+    }
+
+    .field:last-child { margin-bottom: 0; }
+
+    .field label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .field label span {
+      font-family: var(--mono);
+      color: var(--accent-hi);
+    }
+
+    .slider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 2px;
+      background: var(--border-hi);
+      outline: none;
+      border-radius: 1px;
+    }
+
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: 2px solid var(--bg);
+      transition: transform 0.15s;
+    }
+
+    .slider::-webkit-slider-thumb:hover {
+      transform: scale(1.3);
+    }
+
+    .seg-control {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .seg-control button {
+      flex: 1;
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      padding: 0.4rem 0;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .seg-control button.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    /* ── Generate Button ── */
+    #generate-btn {
+      width: 100%;
+      padding: 0.85rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 3px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+      margin-top: 0.25rem;
+    }
+
+    #generate-btn:hover:not(:disabled) { background: var(--accent-hi); }
+    #generate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Progress ── */
+    #progress-wrap {
+      display: none;
+      padding: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #progress-wrap.visible { display: block; }
+
+    #progress-bar-outer {
+      height: 2px;
+      background: var(--border);
+      border-radius: 1px;
+      overflow: hidden;
+      margin-bottom: 0.6rem;
+    }
+
+    #progress-bar-inner {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+
+    #progress-step {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    /* ── Right Panel: Viewer ── */
+    .panel-right {
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      background: var(--surface);
+    }
+
+    #viewer-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    #viewer-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--muted);
+    }
+
+    #viewer-placeholder .ph-icon {
+      font-size: 3.5rem;
+      opacity: 0.15;
+    }
+
+    #viewer-placeholder p {
+      font-size: 0.8rem;
+      opacity: 0.5;
+    }
+
+    #model-viewer {
+      width: 100%;
+      height: 100%;
+      display: none;
+    }
+
+    /* ── Toolbar ── */
+    .viewer-toolbar {
+      border-top: 1px solid var(--border);
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .viewer-toolbar .info {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    #download-btn {
+      padding: 0.45rem 1.25rem;
+      background: none;
+      border: 1px solid var(--border-hi);
+      border-radius: 3px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+      display: none;
+    }
+
+    #download-btn:hover { border-color: var(--accent); color: var(--accent-hi); }
+    #download-btn.visible { display: inline-block; }
+
+    /* ── Error toast ── */
+    #error-toast {
+      display: none;
+      padding: 1rem 1.5rem;
+      background: #1a0a0a;
+      border-top: 1px solid var(--err);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--err);
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+
+    #error-toast.visible { display: block; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">IMAGE<span>_TO_</span>3D</div>
+  <div id="device-badge">LOADING...</div>
+</header>
+
+<main>
+  <!-- Left Panel -->
+  <div class="panel-left">
+
+    <div class="section">
+      <div class="section-label">Input Image</div>
+      <div id="drop-zone">
+        <div class="drop-icon">⬡</div>
+        <div class="drop-text">Drop image here<br/>or click to browse</div>
+        <div class="drop-hint">PNG · JPG · WEBP</div>
+        <img id="preview-img" alt="preview" />
+      </div>
+      <input type="file" id="file-input" accept="image/*" />
+    </div>
+
+    <div class="section">
+      <div class="section-label">Options</div>
+
+      <div class="field">
+        <label>Mesh Quality <span id="res-label">256</span></label>
+        <div class="seg-control">
+          <button class="active" data-val="128">Fast</button>
+          <button class="active" data-val="256">Balanced</button>
+          <button data-val="320">High</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Surface Threshold <span id="thresh-label">25</span></label>
+        <input type="range" class="slider" id="thresh-slider"
+               min="5" max="60" value="25" step="1" />
+      </div>
+    </div>
+
+    <div id="progress-wrap">
+      <div id="progress-bar-outer">
+        <div id="progress-bar-inner"></div>
+      </div>
+      <div id="progress-step">Initializing...</div>
+    </div>
+
+    <div class="section">
+      <button id="generate-btn" disabled>GENERATE 3D MODEL</button>
+    </div>
+
+  </div>
+
+  <!-- Right Panel -->
+  <div class="panel-right">
+    <div id="viewer-wrap">
+      <div id="viewer-placeholder">
+        <div class="ph-icon">⬡</div>
+        <p>3D model will appear here</p>
+      </div>
+      <model-viewer
+        id="model-viewer"
+        auto-rotate
+        camera-controls
+        shadow-intensity="1"
+        environment-image="neutral"
+        exposure="1"
+      ></model-viewer>
+    </div>
+
+    <div id="error-toast"></div>
+
+    <div class="viewer-toolbar">
+      <div class="info" id="status-info">Ready</div>
+      <button id="download-btn">DOWNLOAD GLB</button>
+    </div>
+  </div>
+</main>
+
+<!-- model-viewer web component -->
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+
+<script>
+  // ── State ──
+  let selectedFile = null;
+  let currentJobId = null;
+  let pollInterval = null;
+  let currentFilename = null;
+  let resolution = 256;
+
+  // ── Elements ──
+  const dropZone     = document.getElementById('drop-zone');
+  const fileInput    = document.getElementById('file-input');
+  const previewImg   = document.getElementById('preview-img');
+  const generateBtn  = document.getElementById('generate-btn');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressBar  = document.getElementById('progress-bar-inner');
+  const progressStep = document.getElementById('progress-step');
+  const modelViewer  = document.getElementById('model-viewer');
+  const placeholder  = document.getElementById('viewer-placeholder');
+  const downloadBtn  = document.getElementById('download-btn');
+  const errorToast   = document.getElementById('error-toast');
+  const statusInfo   = document.getElementById('status-info');
+  const deviceBadge  = document.getElementById('device-badge');
+
+  // ── Device info ──
+  fetch('/api/device')
+    .then(r => r.json())
+    .then(d => {
+      deviceBadge.textContent = d.device;
+      if (d.device !== 'CPU (fallback)' && d.device !== 'CPU') {
+        deviceBadge.classList.add('gpu');
+      }
+    })
+    .catch(() => {});
+
+  // ── Seg control for resolution ──
+  document.querySelectorAll('.seg-control button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.seg-control button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      resolution = parseInt(btn.dataset.val);
+      document.getElementById('res-label').textContent = resolution;
+    });
+  });
+
+  // ── Threshold slider ──
+  const threshSlider = document.getElementById('thresh-slider');
+  threshSlider.addEventListener('input', () => {
+    document.getElementById('thresh-label').textContent = threshSlider.value;
+  });
+
+  // ── Drop Zone ──
+  dropZone.addEventListener('click', () => fileInput.click());
+
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) loadFile(file);
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) loadFile(fileInput.files[0]);
+  });
+
+  function loadFile(file) {
+    selectedFile = file;
+    const url = URL.createObjectURL(file);
+    previewImg.src = url;
+    previewImg.style.display = 'block';
+    generateBtn.disabled = false;
+    clearError();
+  }
+
+  // ── Generate ──
+  generateBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    clearError();
+    setGenerating(true);
+
+    const form = new FormData();
+    form.append('image', selectedFile);
+    form.append('resolution', resolution);
+    form.append('mc_threshold', threshSlider.value);
+
+    try {
+      const res = await fetch('/api/generate', { method: 'POST', body: form });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      currentJobId = data.job_id;
+      startPolling();
+    } catch (err) {
+      showError(err.message);
+      setGenerating(false);
+    }
+  });
+
+  function startPolling() {
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(pollStatus, 800);
+  }
+
+  async function pollStatus() {
+    if (!currentJobId) return;
+    try {
+      const res  = await fetch(`/api/status/${currentJobId}`);
+      const data = await res.json();
+
+      updateProgress(data.progress, data.step);
+      statusInfo.textContent = `${data.progress}% — ${data.step || data.status}`;
+
+      if (data.status === 'done') {
+        clearInterval(pollInterval);
+        setGenerating(false);
+        currentFilename = data.output;
+        showModel(`/api/download/${data.output}`);
+      } else if (data.status === 'error') {
+        clearInterval(pollInterval);
+        setGenerating(false);
+        showError(data.error || 'Generation failed');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function updateProgress(pct, step) {
+    progressBar.style.width = `${pct}%`;
+    progressStep.textContent = step || '';
+  }
+
+  function setGenerating(active) {
+    generateBtn.disabled = active;
+    generateBtn.textContent = active ? 'GENERATING...' : 'GENERATE 3D MODEL';
+    progressWrap.classList.toggle('visible', active);
+    if (!active) updateProgress(0, '');
+  }
+
+  function showModel(url) {
+    placeholder.style.display = 'none';
+    modelViewer.style.display = 'block';
+    modelViewer.src = url;
+    downloadBtn.classList.add('visible');
+    statusInfo.textContent = 'Done — model ready';
+  }
+
+  function showError(msg) {
+    errorToast.textContent = msg;
+    errorToast.classList.add('visible');
+    statusInfo.textContent = 'Error';
+  }
+
+  function clearError() {
+    errorToast.classList.remove('visible');
+    errorToast.textContent = '';
+  }
+
+  // ── Download ──
+  downloadBtn.addEventListener('click', () => {
+    if (!currentFilename) return;
+    const a = document.createElement('a');
+    a.href = `/api/download/${currentFilename}`;
+    a.download = currentFilename;
+    a.click();
+  });
+</script>
+</body>
+</html>
