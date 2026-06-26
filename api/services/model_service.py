@@ -1,16 +1,37 @@
 """
-Model service — TripoSR image-to-3D with DirectML (AMD GPU) support.
-Falls back to CPU if DirectML is unavailable.
+Model service — TripoSR image-to-3D with ROCm/CUDA GPU support.
+Falls back to CPU if no GPU is available.
 """
 import io
+import os
 import time
 import uuid
 import threading
+import ctypes
 from pathlib import Path
 from typing import Optional, Dict
 
 import numpy as np
 from PIL import Image
+
+# ------------------------------------------------------------------ #
+# Ensure torch can find its HIP/CUDA libraries at runtime
+# ------------------------------------------------------------------ #
+
+def _setup_runtime_libs():
+    try:
+        import torch
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+        ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+        if torch_lib not in ld_path.split(":"):
+            os.environ["LD_LIBRARY_PATH"] = f"{torch_lib}:{ld_path}"
+        nvrtc = os.path.join(torch_lib, "libcaffe2_nvrtc.so")
+        if os.path.exists(nvrtc):
+            ctypes.CDLL(nvrtc, mode=ctypes.RTLD_GLOBAL)
+    except Exception:
+        pass
+
+_setup_runtime_libs()
 
 # ------------------------------------------------------------------ #
 # Device detection
@@ -19,28 +40,22 @@ from PIL import Image
 def _get_device():
     import torch
     if torch.cuda.is_available():
-        print("[ModelService] Using CUDA (NVIDIA GPU)")
-        return torch.device("cuda"), "CUDA"
-    try:
-        import torch_directml
-        dml_device = torch_directml.device()
-        print("[ModelService] Using DirectML (AMD/Intel GPU)")
-        return dml_device, "DirectML"
-    except Exception as e:
-        print(f"[ModelService] DirectML not available ({e}), using CPU")
-        return torch.device("cpu"), "CPU"
+        hip_ver = getattr(torch.version, "hip", None)
+        if hip_ver:
+            print(f"[ModelService] Using ROCm (AMD GPU) — HIP {hip_ver}")
+            return torch.device("cuda"), f"ROCm ({hip_ver})"
+        name = torch.cuda.get_device_name(0)
+        print(f"[ModelService] Using CUDA (NVIDIA GPU) — {name}")
+        return torch.device("cuda"), f"CUDA ({name})"
+    print("[ModelService] No GPU detected, using CPU")
+    return torch.device("cpu"), "CPU"
 
 
 # ------------------------------------------------------------------ #
 # Paths
 # ------------------------------------------------------------------ #
 
-_BASE = (
-    Path.home()
-    / "AppData" / "Local" / "Packages"
-    / "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0"
-    / "LocalCache" / "Roaming" / "Image3D"
-)
+_BASE = Path.home() / ".local" / "share" / "image3d"
 
 MODELS_DIR  = _BASE / "models"
 OUTPUTS_DIR = _BASE / "outputs"
