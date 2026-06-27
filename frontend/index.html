@@ -150,6 +150,42 @@
       display: none;
     }
 
+    #sanitized-preview {
+      display: none;
+      margin-top: 0.9rem;
+      border: 1px solid var(--border);
+      background: #0d0d10;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    #sanitized-preview.visible { display: block; }
+
+    #sanitized-preview .preview-title {
+      font-family: var(--mono);
+      font-size: 0.64rem;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      padding: 0.55rem 0.7rem;
+      border-bottom: 1px solid var(--border);
+      text-transform: uppercase;
+    }
+
+    #sanitized-img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: contain;
+      background:
+        linear-gradient(45deg, #17171c 25%, transparent 25%),
+        linear-gradient(-45deg, #17171c 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #17171c 75%),
+        linear-gradient(-45deg, transparent 75%, #17171c 75%);
+      background-color: #101014;
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    }
+
     /* ── Settings ── */
     .field {
       margin-bottom: 1.25rem;
@@ -216,6 +252,35 @@
     .seg-control button.active {
       background: var(--accent);
       color: #fff;
+    }
+
+    .preset-meta {
+      margin-top: 0.55rem;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+
+    .advanced-options {
+      margin-top: 1.15rem;
+      border-top: 1px solid var(--border);
+      padding-top: 1rem;
+    }
+
+    .advanced-options summary {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--muted);
+      cursor: pointer;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .advanced-options .advanced-hint {
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+      margin: 0.75rem 0 1rem;
     }
 
     /* ── Generate Button ── */
@@ -383,25 +448,36 @@
         <img id="preview-img" alt="preview" />
       </div>
       <input type="file" id="file-input" accept="image/*" />
+      <div id="sanitized-preview">
+        <div class="preview-title">Sanitized model input</div>
+        <img id="sanitized-img" alt="sanitized preview" />
+      </div>
     </div>
 
     <div class="section">
       <div class="section-label">Options</div>
 
       <div class="field">
-        <label>Mesh Quality <span id="res-label">256</span></label>
+        <label>Generation Preset <span id="preset-label">Balanced</span></label>
         <div class="seg-control">
-          <button class="active" data-val="128">Fast</button>
-          <button class="active" data-val="256">Balanced</button>
-          <button data-val="320">High</button>
+          <button data-preset="fast">Fast</button>
+          <button class="active" data-preset="balanced">Balanced</button>
+          <button data-preset="high">High</button>
         </div>
+        <div class="preset-meta" id="preset-meta">Resolution 256 · threshold 25</div>
       </div>
 
-      <div class="field">
-        <label>Surface Threshold <span id="thresh-label">25</span></label>
-        <input type="range" class="slider" id="thresh-slider"
-               min="5" max="60" value="25" step="1" />
-      </div>
+      <details id="advanced-options" class="advanced-options">
+        <summary>Advanced override</summary>
+        <p class="advanced-hint">
+          Changing this value overrides the preset threshold for the next job.
+        </p>
+        <div class="field">
+          <label>Surface Threshold <span id="thresh-label">25</span></label>
+          <input type="range" class="slider" id="thresh-slider"
+                 min="5" max="60" value="25" step="1" />
+        </div>
+      </details>
     </div>
 
     <div id="progress-wrap">
@@ -426,11 +502,13 @@
       </div>
       <model-viewer
         id="model-viewer"
-        auto-rotate
         camera-controls
-        shadow-intensity="1"
+        camera-orbit="0deg 75deg 105%"
+        field-of-view="35deg"
+        interaction-prompt="none"
+        shadow-intensity="0.25"
         environment-image="neutral"
-        exposure="1"
+        exposure="0.95"
       ></model-viewer>
     </div>
 
@@ -452,12 +530,25 @@
   let currentJobId = null;
   let pollInterval = null;
   let currentFilename = null;
+  let currentPreview = null;
+  let preset = 'balanced';
   let resolution = 256;
+  let advancedMode = false;
+
+  const PRESETS = {
+    fast:     { label: 'Fast',     resolution: 128, threshold: 28 },
+    balanced: { label: 'Balanced', resolution: 256, threshold: 25 },
+    high:     { label: 'High',     resolution: 320, threshold: 22 },
+  };
 
   // ── Elements ──
   const dropZone     = document.getElementById('drop-zone');
   const fileInput    = document.getElementById('file-input');
   const previewImg   = document.getElementById('preview-img');
+  const sanitizedWrap = document.getElementById('sanitized-preview');
+  const sanitizedImg = document.getElementById('sanitized-img');
+  const presetLabel  = document.getElementById('preset-label');
+  const presetMeta   = document.getElementById('preset-meta');
   const generateBtn  = document.getElementById('generate-btn');
   const progressWrap = document.getElementById('progress-wrap');
   const progressBar  = document.getElementById('progress-bar-inner');
@@ -468,6 +559,7 @@
   const errorToast   = document.getElementById('error-toast');
   const statusInfo   = document.getElementById('status-info');
   const deviceBadge  = document.getElementById('device-badge');
+  const advancedOptions = document.getElementById('advanced-options');
 
   // ── Device info ──
   fetch('/api/device')
@@ -480,21 +572,41 @@
     })
     .catch(() => {});
 
-  // ── Seg control for resolution ──
+  // ── Preset control ──
   document.querySelectorAll('.seg-control button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.seg-control button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      resolution = parseInt(btn.dataset.val);
-      document.getElementById('res-label').textContent = resolution;
+      setPreset(btn.dataset.preset);
     });
   });
 
   // ── Threshold slider ──
   const threshSlider = document.getElementById('thresh-slider');
   threshSlider.addEventListener('input', () => {
+    advancedMode = true;
     document.getElementById('thresh-label').textContent = threshSlider.value;
+    updatePresetLabels();
   });
+
+  function setPreset(nextPreset) {
+    preset = nextPreset;
+    const config = PRESETS[preset];
+    resolution = config.resolution;
+    advancedMode = false;
+    threshSlider.value = config.threshold;
+    document.getElementById('thresh-label').textContent = config.threshold;
+    advancedOptions.removeAttribute('open');
+    updatePresetLabels();
+  }
+
+  function updatePresetLabels() {
+    const config = PRESETS[preset];
+    presetLabel.textContent = advancedMode
+      ? `${config.label} + custom`
+      : config.label;
+    presetMeta.textContent = `Resolution ${resolution} · threshold ${threshSlider.value}`;
+  }
 
   // ── Drop Zone ──
   dropZone.addEventListener('click', () => fileInput.click());
@@ -522,6 +634,11 @@
     const url = URL.createObjectURL(file);
     previewImg.src = url;
     previewImg.style.display = 'block';
+    sanitizedWrap.classList.remove('visible');
+    sanitizedImg.removeAttribute('src');
+    currentPreview = null;
+    currentFilename = null;
+    downloadBtn.classList.remove('visible');
     generateBtn.disabled = false;
     clearError();
   }
@@ -535,14 +652,15 @@
 
     const form = new FormData();
     form.append('image', selectedFile);
+    form.append('preset', preset);
+    form.append('advanced', advancedMode);
     form.append('resolution', resolution);
     form.append('mc_threshold', threshSlider.value);
 
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: form });
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || 'Server error');
+        throw new Error(await apiErrorMessage(res));
       }
       const data = await res.json();
       currentJobId = data.job_id;
@@ -567,11 +685,16 @@
       updateProgress(data.progress, data.step);
       statusInfo.textContent = `${data.progress}% — ${data.step || data.status}`;
 
+      if (data.preview && data.preview !== currentPreview) {
+        showSanitizedPreview(data.preview, data.diagnostics?.preprocess);
+      }
+
       if (data.status === 'done') {
         clearInterval(pollInterval);
         setGenerating(false);
         currentFilename = data.output;
         showModel(`/api/download/${data.output}`);
+        statusInfo.textContent = doneStatusText(data);
       } else if (data.status === 'error') {
         clearInterval(pollInterval);
         setGenerating(false);
@@ -602,6 +725,27 @@
     statusInfo.textContent = 'Done — model ready';
   }
 
+  function showSanitizedPreview(filename, diagnostics) {
+    currentPreview = filename;
+    sanitizedImg.src = `/api/preview/${filename}`;
+    sanitizedWrap.classList.add('visible');
+
+    const warnings = diagnostics?.warnings || [];
+    if (warnings.length > 0) {
+      statusInfo.textContent = `Input sanitized — ${warnings.join(', ')}`;
+    }
+  }
+
+  function doneStatusText(data) {
+    const mesh = data.diagnostics?.mesh;
+    const output = data.diagnostics?.output;
+    if (!mesh || !output) return 'Done — model ready';
+
+    const faces = Intl.NumberFormat().format(mesh.faces || 0);
+    const mb = ((output.file_size_bytes || 0) / 1024 / 1024).toFixed(1);
+    return `Done — ${faces} faces · ${mb} MB`;
+  }
+
   function showError(msg) {
     errorToast.textContent = msg;
     errorToast.classList.add('visible');
@@ -611,6 +755,17 @@
   function clearError() {
     errorToast.classList.remove('visible');
     errorToast.textContent = '';
+  }
+
+  async function apiErrorMessage(response) {
+    try {
+      const err = await response.json();
+      if (typeof err.detail === 'string') return err.detail;
+      if (err.detail?.message) return err.detail.message;
+    } catch (e) {
+      console.error(e);
+    }
+    return `Server error (${response.status})`;
   }
 
   // ── Download ──

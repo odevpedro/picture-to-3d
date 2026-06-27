@@ -11,8 +11,8 @@ import ctypes
 from pathlib import Path
 from typing import Optional, Dict
 
-import numpy as np
-from PIL import Image
+from api.services.image_preprocess_service import image_preprocess_service
+from api.services.mesh_postprocess_service import mesh_postprocess_service
 
 # ------------------------------------------------------------------ #
 # Ensure torch can find its HIP/CUDA libraries at runtime
@@ -59,6 +59,7 @@ _BASE = Path.home() / ".local" / "share" / "image3d"
 
 MODELS_DIR  = _BASE / "models"
 OUTPUTS_DIR = _BASE / "outputs"
+PREVIEWS_DIR = _BASE / "previews"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -191,7 +192,9 @@ class Job:
         self.progress = 0
         self.step     = ""
         self.output   = None
+        self.preview  = None
         self.error    = None
+        self.diagnostics = {}
 
 
 # ------------------------------------------------------------------ #
@@ -261,6 +264,7 @@ class ModelService:
     def submit(self, image_bytes: bytes, params: dict) -> str:
         job_id = str(uuid.uuid4())
         job    = Job(job_id)
+        job.diagnostics["request"] = params
         self._jobs[job_id] = job
         threading.Thread(target=self._run, args=(job, image_bytes, params), daemon=True).start()
         return job_id
@@ -270,12 +274,15 @@ class ModelService:
 
         job.status = "running"
         try:
-            job.progress, job.step = 2,  "Loading model..."
+            job.progress, job.step = 2,  "Sanitizing image..."
+            preprocess_result = self._preprocess(image_bytes, job.job_id)
+            image = preprocess_result.image
+            job.preview = preprocess_result.preview_filename
+            job.diagnostics["preprocess"] = preprocess_result.diagnostics
+
+            job.progress, job.step = 10, "Loading model..."
             with self._lock:
                 self._load()
-
-            job.progress, job.step = 8,  "Removing background..."
-            image = self._preprocess(image_bytes)
 
             job.progress, job.step = 15, "Generating 3D shape..."
             resolution   = int(params.get("resolution",    256))
@@ -292,10 +299,20 @@ class ModelService:
                 threshold=mc_threshold,
             )[0]
 
+            job.progress, job.step = 84, "Cleaning mesh..."
+            mesh, mesh_diagnostics = self._postprocess_mesh(mesh, params)
+            job.diagnostics["mesh"] = mesh_diagnostics
+
             job.progress, job.step = 92, "Exporting GLB..."
             filename = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
             out_path = OUTPUTS_DIR / filename
             mesh.export(str(out_path))
+            job.diagnostics["output"] = {
+                "filename": filename,
+                "file_size_bytes": out_path.stat().st_size,
+                "resolution": resolution,
+                "mc_threshold": mc_threshold,
+            }
 
             job.output   = filename
             job.progress = 100
@@ -309,13 +326,41 @@ class ModelService:
             job.status = "error"
             job.error  = tb.strip()
 
-    def _preprocess(self, image_bytes: bytes) -> Image.Image:
-        import rembg
-        img = Image.open(io.BytesIO(image_bytes))
-        img = rembg.remove(img).convert("RGBA")
-        bg  = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        return bg
+    def _preprocess(self, image_bytes: bytes, job_id: str):
+        return image_preprocess_service.prepare(
+            image_bytes,
+            preview_dir=PREVIEWS_DIR,
+            preview_stem=job_id,
+        )
+
+    def _mesh_diagnostics(self, mesh) -> dict:
+        vertices = getattr(mesh, "vertices", [])
+        faces = getattr(mesh, "faces", [])
+        bounds = getattr(mesh, "bounds", None)
+        extents = getattr(mesh, "extents", None)
+        return {
+            "vertices": len(vertices),
+            "faces": len(faces),
+            "bounds": bounds.tolist() if bounds is not None else None,
+            "extents": extents.tolist() if extents is not None else None,
+        }
+
+    def _postprocess_mesh(self, mesh, params: dict):
+        try:
+            result = mesh_postprocess_service.process(
+                mesh,
+                smoothing_iterations=int(params.get("smoothing_iterations", 2)),
+            )
+            diagnostics = self._mesh_diagnostics(result.mesh)
+            diagnostics["postprocess"] = result.diagnostics
+            return result.mesh, diagnostics
+        except Exception as exc:
+            diagnostics = self._mesh_diagnostics(mesh)
+            diagnostics["postprocess"] = {
+                "error": str(exc),
+                "applied": False,
+            }
+            return mesh, diagnostics
 
 
 model_service = ModelService()
