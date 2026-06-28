@@ -1,0 +1,10 @@
+.git
+.venv
+__pycache__
+*.pyc
+.deps_installed
+.test-data
+.pytest_cache
+models
+outputs
+previews
