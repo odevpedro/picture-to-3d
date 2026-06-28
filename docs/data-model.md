@@ -1,7 +1,7 @@
 # Data Model — Image to 3D
 
 > Documento vivo do modelo de dados. Atualizado sempre que uma entidade for criada, alterada ou removida.
-> Ultima atualizacao: 2026-06-26 (v0.2.0 — ROCm Linux port)
+> Ultima atualizacao: 2026-06-28 (v0.3.0 — history, timings and preview/full outputs)
 
 ---
 
@@ -37,8 +37,17 @@ Estrutura que representa uma requisicao de geracao 3D. Criada na submissao, atua
 | `status` | str | "pending" | Estado: pending, running, done, error |
 | `progress` | int | 0 | Progresso estimado 0-100 |
 | `step` | str | "" | Descricao textual da etapa atual |
-| `output` | str or None | None | Nome do arquivo GLB gerado |
-| `error` | str or None | None | Traceback em caso de erro |
+| `output` | str or None | None | Nome do GLB completo gerado |
+| `full_output` | str or None | None | Alias explicito do GLB completo para download |
+| `preview_output` | str or None | None | GLB otimizado para visualizacao no browser |
+| `preview` | str or None | None | Nome do PNG sanitizado salvo em `previews/` |
+| `error` | str or None | None | Mensagem segura para o cliente em caso de erro |
+| `settings` | dict | `{}` | Parametros resolvidos usados pelo job |
+| `diagnostics` | dict | `{}` | Diagnosticos de request, preprocess, mesh, output e erro |
+| `stage_timings` | dict | `{}` | Duracao por etapa do pipeline |
+| `created_at` | float | timestamp | Instante de criacao do job |
+| `updated_at` | float | timestamp | Ultima atualizacao do job |
+| `completed_at` | float or None | None | Instante de conclusao ou erro |
 
 **Transicoes de estado:**
 
@@ -60,7 +69,11 @@ Singleton que gerencia o modelo TripoSR, deteccao de dispositivo e fila de jobs.
 |----------|------|-----------|
 | `_model` | TSR or None | Instancia do modelo (lazy loaded, sob lock) |
 | `_lock` | threading.Lock | Lock para carga segura do modelo |
+| `_jobs_lock` | threading.Lock | Lock para acesso ao dicionario de jobs |
 | `_jobs` | Dict[str, Job] | Dicionario de jobs ativos |
+| `_max_jobs` | int | Limite de jobs mantidos em memoria |
+| `output_retention_days` | int | Idade maxima padrao para GLBs gerados |
+| `max_output_files` | int | Quantidade maxima padrao de GLBs retidos |
 | `device` | torch.device or None | Dispositivo de inferencia ativo |
 | `device_name` | str | Nome legivel do dispositivo (e.g. "ROCm (7.1.0)", "CUDA (NVIDIA...)", "CPU") |
 
@@ -71,9 +84,60 @@ Singleton que gerencia o modelo TripoSR, deteccao de dispositivo e fila de jobs.
 | `_load()` | Carrega modelo TripoSR no dispositivo detectado (lazy, thread-safe) |
 | `unload()` | Libera modelo da memoria |
 | `submit(image_bytes, params)` | Cria job e inicia thread de processamento |
+| `prepare_preview(image_bytes, params)` | Executa somente preprocessamento para preview/edicao de mascara |
 | `get_job(job_id)` | Retorna job ou None |
 | `_run(job, image_bytes, params)` | Pipeline completo de geracao (executado em thread) |
 | `_preprocess(image_bytes)` | Remove fundo da imagem com rembg |
+| `_write_job_metadata(job)` | Salva JSON sidecar ao lado do GLB gerado |
+| `list_history(limit)` | Lista jobs concluidos a partir dos JSON sidecars persistidos |
+| `cleanup_outputs(dry_run, max_age_days, max_files)` | Remove outputs/previews/metadata antigos ou excedentes |
+| `_prune_jobs_locked()` | Remove jobs finalizados antigos quando `_max_jobs` e excedido |
+
+### Generation Mode
+
+| Valor | Descricao |
+|-------|-----------|
+| `auto` | Escolhe `silhouette` para imagens transparentes/delgadas e `ai` para objetos mais volumetricos |
+| `ai` | Usa TripoSR para reconstruir volume completo a partir da imagem |
+| `silhouette` | Extruda a mascara sanitizada em uma malha fina preservando a silhueta |
+
+`silhouette` e indicado para objetos frontais e delgados, como laminas, logos, placas e icones.
+
+### Input Source
+
+| Valor | Descricao |
+|-------|-----------|
+| `sanitized` | Remove fundo quando necessario, recorta pelo foreground e centraliza em canvas quadrado |
+| `original` | Preserva o enquadramento original, corrigindo EXIF e mantendo alpha quando existir |
+
+### Generation Controls
+
+| Campo | Default | Descricao |
+|-------|---------|-----------|
+| `object_type` | `auto` | Preset de UI: `auto`, `thin`, `icon`, `rounded` |
+| `foreground_ratio` | `0.84` | Tamanho relativo do foreground no canvas sanitizado |
+| `extrude_depth` | `0.08` | Profundidade da extrusao no modo `silhouette` |
+| `alpha_threshold` | `8` | Corte de alpha usado para gerar a mascara |
+| `mask_bias` | `0` | Ajuste morfologico da mascara: negativo reduz, positivo expande |
+| `mask_edits` | `[]` | Strokes manuais normalizados: `mode`, `x`, `y`, `radius` |
+
+### Job Metadata Sidecar
+
+Cada job concluido grava um JSON em `outputs/` com o mesmo stem do GLB completo.
+
+| Campo | Descricao |
+|-------|-----------|
+| `job_id` | Identificador do job original |
+| `status` | Estado final do job |
+| `output` | GLB completo, preservado por compatibilidade |
+| `full_output` | GLB completo usado pelo botao de download |
+| `preview_output` | GLB menor usado pelo viewer |
+| `outputs` | Mapa `{full, preview}` para limpeza associada |
+| `preview` | PNG RGBA do input preparado |
+| `settings` | Parametros resolvidos, incluindo strokes de mascara |
+| `diagnostics` | Dados de preprocess, mesh, output, erros e timings |
+| `stage_timings` | Copia direta dos tempos por etapa |
+| `created_at`, `updated_at`, `completed_at` | Timestamps Unix do ciclo de vida |
 
 ### Paths
 
@@ -83,8 +147,23 @@ Diretorios de armazenamento gerenciados pelo servico.
 
 | Variavel | Path | Descricao |
 |----------|------|-----------|
-| `MODELS_DIR` | `~/.local/share/image3d/models/` | Cache de source TripoSR e weights |
-| `OUTPUTS_DIR` | `~/.local/share/image3d/outputs/` | GLB gerados |
+| `MODELS_DIR` | `{IMAGE3D_DATA_DIR}/models/` | Cache de source TripoSR e weights |
+| `OUTPUTS_DIR` | `{IMAGE3D_DATA_DIR}/outputs/` | GLB gerados e metadata JSON |
+| `PREVIEWS_DIR` | `{IMAGE3D_DATA_DIR}/previews/` | PNG sanitizados antes da geracao |
+
+`IMAGE3D_DATA_DIR` e opcional. Quando ausente, o default e `~/.local/share/image3d/`.
+
+### Retencao de outputs
+
+O cleanup roda no startup da API e tambem pode ser chamado por `POST /api/cleanup`.
+
+| Configuracao | Default | Descricao |
+|--------------|---------|-----------|
+| `IMAGE3D_OUTPUT_RETENTION_DAYS` | 14 | Remove GLBs mais antigos que este limite |
+| `IMAGE3D_MAX_OUTPUT_FILES` | 100 | Remove GLBs excedentes mantendo os mais recentes |
+
+Quando um GLB e removido, o JSON sidecar com mesmo stem e o preview PNG referenciado no JSON
+tambem sao removidos. Metadata e previews orfaos antigos tambem sao limpos.
 
 Estrutura em disco:
 
@@ -101,7 +180,12 @@ Estrutura em disco:
 │       ├── model.ckpt               # Weights (~1.5 GB)
 │       └── config.yaml              # Configuracao do modelo
 └── outputs/
-    └── {timestamp}_{uuid8}.glb      # GLB gerados
+    ├── {timestamp}_{uuid8}.glb      # GLB completo
+    ├── {timestamp}_{uuid8}_preview.glb
+    └── {timestamp}_{uuid8}.json     # Metadata do job
+└── previews/
+    ├── {job_id}_sanitized.png       # Entrada sanitizada usada pelo modelo
+    └── {job_id}_original.png        # Entrada original preservada quando selecionada
 ```
 
 ### Device Detection

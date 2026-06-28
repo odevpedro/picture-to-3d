@@ -1,7 +1,7 @@
 # Backlog — Image to 3D
 
 > Current project state and pending work. Updated during development.
-> Ultima atualizacao: 2026-06-26 (v0.3.0 planning)
+> Ultima atualizacao: 2026-06-28 (v0.3.0 closeout)
 
 ---
 
@@ -9,9 +9,9 @@
 
 | Category | Count |
 |----------|-------|
-| Completed | 10 |
+| Completed | 21 |
 | In Progress | 0 |
-| Pending | 12 |
+| Pending | 6 |
 
 ---
 
@@ -22,19 +22,6 @@ _(none)_
 ---
 
 ## Pending
-
-### [ ] [UX | Sanitized image preview]
-**Show the user the actual image that will be sent to the 3D model**
-
-Checklist:
-- Add preprocessing-only endpoint before running full 3D generation
-- Show warnings in a dedicated UI area instead of status text only
-- Allow user to adjust padding/crop preset before generation
-- Add "generate from this sanitized input" flow if preprocessing becomes async
-
-Rationale:
-- Users need to see whether the model received a clean object or a bad crop
-- This makes image quality problems explainable instead of mysterious
 
 ### [ ] [MODEL | Generation presets]
 **Replace raw resolution/threshold controls with safer presets**
@@ -60,20 +47,6 @@ Rationale:
 - Initial cleanup/smoothing now runs before GLB export
 - Remaining work is focused on optimization and tuning quality tradeoffs
 
-### [ ] [MESH | Dual output variants]
-**Generate a web-optimized preview model and a full-quality download model**
-
-Checklist:
-- Export `{job_id}_preview.glb` with lower face count
-- Export `{job_id}_full.glb` with higher quality settings
-- Show preview GLB in the browser by default
-- Keep the full GLB available from the download button
-- Include both filenames in `/api/status/{job_id}`
-
-Rationale:
-- The browser viewer does not need the full mesh
-- Smaller preview models reduce GPU load and make interaction smoother
-
 ### [ ] [VIEWER | GPU-friendly rendering]
 **Make browser manipulation cheaper and quieter on the GPU**
 
@@ -91,10 +64,11 @@ Rationale:
 **Improve how generated models are lit, framed, and inspected**
 
 Checklist:
-- Auto-frame model from bounds after load
+- [x] Auto-frame model from bounds after load
 - Use better neutral lighting/environment
 - Add floor/contact shadow only when performance budget allows
-- Add reset camera button
+- [x] Add reset camera button
+- [x] Add material/solid inspection mode on current `<model-viewer>`
 - Add wireframe/solid/color inspection modes if using custom Three.js
 - Improve mobile layout for the viewer and controls
 
@@ -106,69 +80,26 @@ Rationale:
 **Reject bad or risky uploads early**
 
 Checklist:
-- Return structured errors instead of raw tracebacks to the UI
-- Keep detailed tracebacks in server logs only
-- Add shared filename/path validation helper for preview/download routes
-- Add request-level telemetry for rejected uploads
+- [x] Return safe job errors instead of raw tracebacks to the UI
+- [x] Keep detailed tracebacks in server logs only
+- [x] Add shared filename/path validation helper for preview/download routes
+- [ ] Add request-level telemetry for rejected uploads
 
 Rationale:
 - Upload validation now covers the first layer of bad inputs
 - Remaining work is focused on safer error surfaces and route hygiene
-
-### [ ] [JOBS | Lifecycle and cleanup]
-**Make local job/output storage more predictable**
-
-Checklist:
-- Store job metadata next to generated files
-- Add output retention policy
-- Add cleanup endpoint or startup cleanup task
-- Avoid unbounded growth of in-memory `_jobs`
-- Include timestamps and settings in job status
-- Add a simple job history view in the UI
-
-Rationale:
-- Jobs are currently in memory and outputs accumulate in `~/.local/share/image3d/outputs/`
-- This is acceptable for early local use but not for prolonged use
 
 ### [ ] [OBSERVABILITY | Generation diagnostics]
 **Expose enough metrics to understand quality and performance**
 
 Checklist:
 - Log preprocessing dimensions and alpha bounding box
-- Log generation time per stage
-- Add richer `/api/status/{job_id}` diagnostics for stage timings
+- [x] Log generation time per stage
+- [x] Add richer `/api/status/{job_id}` diagnostics for stage timings
 - Show preprocessing warnings and mesh diagnostics in a dedicated UI panel
 
 Rationale:
 - It is hard to know whether a bad result came from input crop, model inference, threshold, or viewer rendering
-
-### [ ] [DEV | Automated tests]
-**Add test suite for API endpoints**
-
-Checklist:
-- Test image upload validation
-- Test status polling
-- Test download path traversal protection
-- Mock model service for CI without GPU
-- Add tests for image sanitization once implemented
-
-### [ ] [INFRA | CI/CD pipeline]
-**Set up automated CI for Linux build without requiring GPU**
-
-Checklist:
-- GitHub Actions workflow for dependency installation
-- Run API tests with mocked model service
-- Basic health check test on startup
-- Validate formatting/imports
-
-### [ ] [DEV | Docker image]
-**Create Dockerfile for reproducible local builds**
-
-Checklist:
-- ROCm-oriented Linux image option
-- CPU-only development image option
-- Pre-cache Python dependencies
-- Document model weights cache volume
 
 ### [ ] [RESEARCH | Alternative mesh extraction]
 **Investigate alternatives to current marching-cubes extraction**
@@ -186,6 +117,111 @@ Rationale:
 ---
 
 ## Completed
+
+### [x] [UX | 2026-06-28] Preprocess preview and manual mask editing
+**Preview and edit the alpha mask before running full 3D generation**
+
+- Adds `POST /api/preprocess` for model-input PNG preview without loading TripoSR
+- Shows the prepared RGBA input and alpha mask in the frontend
+- Adds erase/restore brush strokes with undo and clear controls
+- Sends normalized `mask_edits` with generation requests
+- Applies manual strokes to sanitized or original alpha before mesh generation
+- Adds tests for mask edit validation and preprocessing effects
+
+### [x] [MESH | 2026-06-28] Preview and full GLB outputs
+**Generate a browser preview model separately from the full download model**
+
+- Exports a full GLB and a `_preview.glb` for each completed job
+- Uses quadric decimation for preview GLBs when available
+- Keeps `output` as the full GLB for compatibility
+- Adds `full_output` and `preview_output` to job status and metadata
+- Updates cleanup to remove associated GLB variants, metadata and PNG previews together
+
+### [x] [JOBS | 2026-06-28] Persistent job history
+**List completed jobs from metadata sidecars after restart**
+
+- Adds `GET /api/history`
+- Reads recent completed jobs from `outputs/*.json`
+- Shows a persistent history list in the frontend
+- Allows reopening old preview/full outputs from history
+- Adds tests for metadata-backed history
+
+### [x] [OBSERVABILITY | 2026-06-28] Stage timing metrics
+**Expose generation duration per pipeline stage**
+
+- Tracks preprocess, model load, inference, mesh extraction, postprocess, silhouette and export timings
+- Includes timings in job diagnostics, status responses and metadata
+- Shows total generation time in the viewer status summary when available
+
+### [x] [VIEWER | 2026-06-28] Viewer reset and inspection controls
+**Improve basic inspection without replacing the current viewer**
+
+- Adds reset camera control
+- Reframes the model after load through `<model-viewer>` camera APIs
+- Adds a matte inspection toggle for quick shape checks
+- Keeps true wireframe as a future Three.js viewer task
+
+### [x] [DEV | 2026-06-28] CPU Docker image
+**Create a reproducible container for local CPU development**
+
+- Adds `Dockerfile` based on Python 3.12 slim
+- Installs CPU PyTorch plus runtime image dependencies
+- Uses `IMAGE3D_DATA_DIR=/data`
+- Adds `.dockerignore`
+- Documents build/run commands and the `/data` cache volume
+
+### [x] [MODEL | 2026-06-27] Flat object silhouette mode
+**Preserve thin/simple object silhouettes without TripoSR volume hallucination**
+
+- Adds `mode=auto` and `mode=silhouette` generation paths
+- Extrudes the sanitized alpha mask into a thin textured GLB
+- Skips model loading for silhouette mode
+- Adds frontend `Auto` / `AI Volume` / `Flat Object` selector
+- Preserves larger holes in preprocessing instead of filling every mask hole
+- Adds `Sanitized` / `Original` model input selection
+- Adds object type presets: Auto, Thin, Icon and Rounded
+- Adds padding, flat-depth, alpha-cutoff and mask-bias controls
+- Adds alpha-mask preview and side-by-side comparison of recent outputs
+- Adds tests for mode validation and silhouette mesh generation
+
+
+### [x] [JOBS | 2026-06-27] Output retention and cleanup
+**Bound local output/previews/metadata growth**
+
+- Adds startup cleanup for generated outputs
+- Adds `POST /api/cleanup` for manual cleanup and dry runs
+- Retains outputs by age and maximum GLB count
+- Removes sidecar metadata and sanitized previews associated with removed GLBs
+- Removes old orphan metadata and preview files
+- Adds tests for age cleanup, count cleanup, dry-run behavior and endpoint forwarding
+
+
+### [x] [DEV | 2026-06-27] Automated API test foundation
+**Add fast API tests without GPU or TripoSR model loading**
+
+- Adds pytest coverage for upload validation
+- Tests generation preset resolution and advanced clamps
+- Tests status responses with job metadata
+- Tests preview/download filename guardrails
+- Uses a fake model service so CI does not need GPU or model weights
+
+### [x] [INFRA | 2026-06-27] Basic CI workflow
+**Run syntax and API tests on GitHub Actions**
+
+- Adds `.github/workflows/ci.yml`
+- Installs Python 3.12 dependencies without PyTorch/ROCm model setup
+- Runs `python -m compileall api tests`
+- Runs `pytest -q`
+
+### [x] [DEV | 2026-06-27] Repository hygiene and runtime metadata
+**Remove local artifacts from source control and tighten project metadata**
+
+- Removes tracked Python bytecode files
+- Removes tracked `.deps_installed` local setup sentinel
+- Ignores `.deps_installed` and `.test-data/`
+- Fixes the `serve` project script to point to a Python callable
+- Bumps project metadata to v0.3.0
+- Adds `IMAGE3D_DATA_DIR` for isolated storage roots
 
 ### [x] [MESH | 2026-06-26] Initial mesh post-processing
 **Clean generated mesh before GLB export**
