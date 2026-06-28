@@ -161,13 +161,20 @@
 
     #sanitized-preview.visible { display: block; }
 
+    #sanitized-preview .preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.7rem;
+      border-bottom: 1px solid var(--border);
+    }
+
     #sanitized-preview .preview-title {
       font-family: var(--mono);
       font-size: 0.64rem;
       letter-spacing: 0.12em;
       color: var(--muted);
-      padding: 0.55rem 0.7rem;
-      border-bottom: 1px solid var(--border);
       text-transform: uppercase;
     }
 
@@ -184,6 +191,89 @@
       background-color: #101014;
       background-size: 20px 20px;
       background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    }
+
+    #mask-canvas {
+      display: none;
+      width: 100%;
+      aspect-ratio: 1;
+      background: #050507;
+      border-top: 1px solid var(--border);
+      image-rendering: pixelated;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    #mask-canvas.visible { display: block; }
+
+    .mini-button {
+      background: none;
+      border: 1px solid var(--border-hi);
+      border-radius: 3px;
+      color: var(--muted);
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.08em;
+      padding: 0.32rem 0.55rem;
+      transition: border-color 0.2s, color 0.2s;
+      white-space: nowrap;
+    }
+
+    .mini-button:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent-hi);
+    }
+
+    .mini-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    #prepare-mask-btn {
+      display: none;
+    }
+
+    #prepare-mask-btn.visible {
+      display: inline-block;
+    }
+
+    .mask-tools {
+      display: none;
+      border-top: 1px solid var(--border);
+      padding: 0.75rem;
+      gap: 0.75rem;
+      flex-direction: column;
+    }
+
+    .mask-tools.visible {
+      display: flex;
+    }
+
+    .mask-tool-row {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .mask-mode-control {
+      flex: 1;
+    }
+
+    .brush-field {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 0.55rem;
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      color: var(--muted);
+    }
+
+    .brush-field span {
+      color: var(--accent-hi);
+      min-width: 2rem;
+      text-align: right;
     }
 
     /* ── Settings ── */
@@ -372,6 +462,44 @@
       display: none;
     }
 
+    #compare-wrap {
+      width: 100%;
+      height: 100%;
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--border);
+    }
+
+    #compare-wrap.visible { display: grid; }
+
+    .compare-pane {
+      min-width: 0;
+      position: relative;
+      border-left: 1px solid var(--border);
+    }
+
+    .compare-pane:first-child { border-left: none; }
+
+    .compare-pane model-viewer {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .compare-label {
+      position: absolute;
+      left: 0.75rem;
+      top: 0.75rem;
+      z-index: 2;
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      color: var(--text);
+      background: rgba(10, 10, 11, 0.72);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.25rem 0.45rem;
+    }
+
     /* ── Toolbar ── */
     .viewer-toolbar {
       border-top: 1px solid var(--border);
@@ -387,7 +515,7 @@
       color: var(--muted);
     }
 
-    #download-btn {
+    .viewer-toolbar button {
       padding: 0.45rem 1.25rem;
       background: none;
       border: 1px solid var(--border-hi);
@@ -401,8 +529,55 @@
       display: none;
     }
 
-    #download-btn:hover { border-color: var(--accent); color: var(--accent-hi); }
-    #download-btn.visible { display: inline-block; }
+    .viewer-toolbar button:hover { border-color: var(--accent); color: var(--accent-hi); }
+    .viewer-toolbar button.visible { display: inline-block; }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    #history-list {
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .history-empty {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+    }
+
+    .history-item {
+      width: 100%;
+      background: #0d0d10;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      cursor: pointer;
+      display: grid;
+      gap: 0.25rem;
+      padding: 0.65rem 0.7rem;
+      text-align: left;
+      transition: border-color 0.2s;
+    }
+
+    .history-item:hover {
+      border-color: var(--accent);
+    }
+
+    .history-item strong {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 400;
+      color: var(--accent-hi);
+    }
+
+    .history-item span {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
 
     /* ── Error toast ── */
     #error-toast {
@@ -449,8 +624,28 @@
       </div>
       <input type="file" id="file-input" accept="image/*" />
       <div id="sanitized-preview">
-        <div class="preview-title">Sanitized model input</div>
+        <div class="preview-header">
+          <div class="preview-title">Model input preview</div>
+          <button id="prepare-mask-btn" class="mini-button" type="button">UPDATE</button>
+        </div>
         <img id="sanitized-img" alt="sanitized preview" />
+        <canvas id="mask-canvas" width="160" height="160"></canvas>
+        <div id="mask-tools" class="mask-tools">
+          <div class="mask-tool-row">
+            <div class="seg-control mask-mode-control">
+              <button class="active" data-mask-mode="erase" type="button">Erase</button>
+              <button data-mask-mode="restore" type="button">Restore</button>
+            </div>
+            <button id="undo-mask-btn" class="mini-button" type="button">UNDO</button>
+            <button id="clear-mask-btn" class="mini-button" type="button">CLEAR</button>
+          </div>
+          <label class="brush-field">
+            Brush
+            <input type="range" class="slider" id="brush-slider"
+                   min="1" max="20" value="5" step="1" />
+            <span id="brush-label">5%</span>
+          </label>
+        </div>
       </div>
     </div>
 
@@ -458,8 +653,38 @@
       <div class="section-label">Options</div>
 
       <div class="field">
+        <label>Object Type <span id="object-type-label">Auto</span></label>
+        <div class="seg-control object-type-control">
+          <button class="active" data-object-type="auto">Auto</button>
+          <button data-object-type="thin">Thin</button>
+          <button data-object-type="icon">Icon</button>
+          <button data-object-type="rounded">Rounded</button>
+        </div>
+        <div class="preset-meta" id="object-type-meta">Adaptive defaults</div>
+      </div>
+
+      <div class="field">
+        <label>Generation Mode <span id="mode-label">Auto</span></label>
+        <div class="seg-control mode-control">
+          <button class="active" data-mode="auto">Auto</button>
+          <button data-mode="ai">AI Volume</button>
+          <button data-mode="silhouette">Flat Object</button>
+        </div>
+        <div class="preset-meta" id="mode-meta">Chooses flat extrusion for transparent/thin objects</div>
+      </div>
+
+      <div class="field">
+        <label>Model Input <span id="input-source-label">Sanitized</span></label>
+        <div class="seg-control input-source-control">
+          <button class="active" data-input-source="sanitized">Sanitized</button>
+          <button data-input-source="original">Original</button>
+        </div>
+        <div class="preset-meta" id="input-source-meta">Remove background, crop and center object</div>
+      </div>
+
+      <div class="field">
         <label>Generation Preset <span id="preset-label">Balanced</span></label>
-        <div class="seg-control">
+        <div class="seg-control preset-control">
           <button data-preset="fast">Fast</button>
           <button class="active" data-preset="balanced">Balanced</button>
           <button data-preset="high">High</button>
@@ -477,6 +702,26 @@
           <input type="range" class="slider" id="thresh-slider"
                  min="5" max="60" value="25" step="1" />
         </div>
+        <div class="field">
+          <label>Padding <span id="padding-label">84%</span></label>
+          <input type="range" class="slider" id="padding-slider"
+                 min="55" max="95" value="84" step="1" />
+        </div>
+        <div class="field">
+          <label>Flat Depth <span id="depth-label">0.08</span></label>
+          <input type="range" class="slider" id="depth-slider"
+                 min="1" max="30" value="8" step="1" />
+        </div>
+        <div class="field">
+          <label>Alpha Cutoff <span id="alpha-label">8</span></label>
+          <input type="range" class="slider" id="alpha-slider"
+                 min="1" max="254" value="8" step="1" />
+        </div>
+        <div class="field">
+          <label>Mask Bias <span id="mask-bias-label">0</span></label>
+          <input type="range" class="slider" id="mask-bias-slider"
+                 min="-8" max="8" value="0" step="1" />
+        </div>
       </details>
     </div>
 
@@ -489,6 +734,13 @@
 
     <div class="section">
       <button id="generate-btn" disabled>GENERATE 3D MODEL</button>
+    </div>
+
+    <div class="section">
+      <div class="section-label">History</div>
+      <div id="history-list">
+        <div class="history-empty">No finished jobs yet</div>
+      </div>
     </div>
 
   </div>
@@ -510,13 +762,30 @@
         environment-image="neutral"
         exposure="0.95"
       ></model-viewer>
+      <div id="compare-wrap">
+        <div class="compare-pane">
+          <div class="compare-label" id="compare-a-label">A</div>
+          <model-viewer id="compare-a" camera-controls interaction-prompt="none"
+                        shadow-intensity="0.2" environment-image="neutral"></model-viewer>
+        </div>
+        <div class="compare-pane">
+          <div class="compare-label" id="compare-b-label">B</div>
+          <model-viewer id="compare-b" camera-controls interaction-prompt="none"
+                        shadow-intensity="0.2" environment-image="neutral"></model-viewer>
+        </div>
+      </div>
     </div>
 
     <div id="error-toast"></div>
 
     <div class="viewer-toolbar">
       <div class="info" id="status-info">Ready</div>
-      <button id="download-btn">DOWNLOAD GLB</button>
+      <div class="toolbar-actions">
+        <button id="reset-camera-btn">RESET</button>
+        <button id="inspect-btn">MATTE</button>
+        <button id="compare-btn">COMPARE</button>
+        <button id="download-btn">DOWNLOAD GLB</button>
+      </div>
     </div>
   </div>
 </main>
@@ -530,10 +799,29 @@
   let currentJobId = null;
   let pollInterval = null;
   let currentFilename = null;
+  let currentDisplayFilename = null;
+  let currentDownloadFilename = null;
   let currentPreview = null;
+  let resultHistory = [];
+  let compareVisible = false;
+  let inspectMode = 'material';
   let preset = 'balanced';
+  let generationMode = 'auto';
+  let inputSource = 'sanitized';
+  let objectType = 'auto';
+  let foregroundRatio = 0.84;
+  let extrudeDepth = 0.08;
+  let alphaThreshold = 8;
+  let maskBias = 0;
   let resolution = 256;
   let advancedMode = false;
+  let maskEdits = [];
+  let maskMode = 'erase';
+  let brushRadius = 0.05;
+  let baseMaskData = null;
+  let paintingMask = false;
+  let previewRequestSeq = 0;
+  let preparePreviewTimer = null;
 
   const PRESETS = {
     fast:     { label: 'Fast',     resolution: 128, threshold: 28 },
@@ -547,6 +835,19 @@
   const previewImg   = document.getElementById('preview-img');
   const sanitizedWrap = document.getElementById('sanitized-preview');
   const sanitizedImg = document.getElementById('sanitized-img');
+  const maskCanvas   = document.getElementById('mask-canvas');
+  const maskTools    = document.getElementById('mask-tools');
+  const prepareMaskBtn = document.getElementById('prepare-mask-btn');
+  const brushSlider  = document.getElementById('brush-slider');
+  const brushLabel   = document.getElementById('brush-label');
+  const undoMaskBtn  = document.getElementById('undo-mask-btn');
+  const clearMaskBtn = document.getElementById('clear-mask-btn');
+  const objectTypeLabel = document.getElementById('object-type-label');
+  const objectTypeMeta = document.getElementById('object-type-meta');
+  const modeLabel    = document.getElementById('mode-label');
+  const modeMeta     = document.getElementById('mode-meta');
+  const inputSourceLabel = document.getElementById('input-source-label');
+  const inputSourceMeta = document.getElementById('input-source-meta');
   const presetLabel  = document.getElementById('preset-label');
   const presetMeta   = document.getElementById('preset-meta');
   const generateBtn  = document.getElementById('generate-btn');
@@ -554,12 +855,25 @@
   const progressBar  = document.getElementById('progress-bar-inner');
   const progressStep = document.getElementById('progress-step');
   const modelViewer  = document.getElementById('model-viewer');
+  const compareWrap  = document.getElementById('compare-wrap');
+  const compareA     = document.getElementById('compare-a');
+  const compareB     = document.getElementById('compare-b');
+  const compareALabel = document.getElementById('compare-a-label');
+  const compareBLabel = document.getElementById('compare-b-label');
   const placeholder  = document.getElementById('viewer-placeholder');
   const downloadBtn  = document.getElementById('download-btn');
+  const compareBtn   = document.getElementById('compare-btn');
+  const resetCameraBtn = document.getElementById('reset-camera-btn');
+  const inspectBtn   = document.getElementById('inspect-btn');
   const errorToast   = document.getElementById('error-toast');
   const statusInfo   = document.getElementById('status-info');
   const deviceBadge  = document.getElementById('device-badge');
+  const historyList  = document.getElementById('history-list');
   const advancedOptions = document.getElementById('advanced-options');
+  const paddingSlider = document.getElementById('padding-slider');
+  const depthSlider = document.getElementById('depth-slider');
+  const alphaSlider = document.getElementById('alpha-slider');
+  const maskBiasSlider = document.getElementById('mask-bias-slider');
 
   // ── Device info ──
   fetch('/api/device')
@@ -572,12 +886,43 @@
     })
     .catch(() => {});
 
+  loadHistory();
+
   // ── Preset control ──
-  document.querySelectorAll('.seg-control button').forEach(btn => {
+  document.querySelectorAll('.preset-control button').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.seg-control button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.preset-control button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       setPreset(btn.dataset.preset);
+    });
+  });
+
+  document.querySelectorAll('.mode-control button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.mode-control button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      generationMode = btn.dataset.mode;
+      updateModeLabels();
+    });
+  });
+
+  document.querySelectorAll('.object-type-control button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.object-type-control button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      applyObjectType(btn.dataset.objectType);
+      scheduleMaskPreview();
+    });
+  });
+
+  document.querySelectorAll('.input-source-control button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.input-source-control button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      inputSource = btn.dataset.inputSource;
+      updateInputSourceLabels();
+      resetMaskEdits();
+      scheduleMaskPreview();
     });
   });
 
@@ -587,6 +932,88 @@
     advancedMode = true;
     document.getElementById('thresh-label').textContent = threshSlider.value;
     updatePresetLabels();
+  });
+
+  paddingSlider.addEventListener('input', () => {
+    foregroundRatio = Number(paddingSlider.value) / 100;
+    document.getElementById('padding-label').textContent = `${paddingSlider.value}%`;
+  });
+  paddingSlider.addEventListener('change', () => scheduleMaskPreview());
+
+  depthSlider.addEventListener('input', () => {
+    extrudeDepth = Number(depthSlider.value) / 100;
+    document.getElementById('depth-label').textContent = extrudeDepth.toFixed(2);
+  });
+
+  alphaSlider.addEventListener('input', () => {
+    alphaThreshold = Number(alphaSlider.value);
+    document.getElementById('alpha-label').textContent = alphaSlider.value;
+  });
+  alphaSlider.addEventListener('change', () => {
+    resetMaskEdits();
+    scheduleMaskPreview();
+  });
+
+  maskBiasSlider.addEventListener('input', () => {
+    maskBias = Number(maskBiasSlider.value);
+    document.getElementById('mask-bias-label').textContent = maskBiasSlider.value;
+  });
+  maskBiasSlider.addEventListener('change', () => {
+    resetMaskEdits();
+    scheduleMaskPreview();
+  });
+
+  prepareMaskBtn.addEventListener('click', () => {
+    resetMaskEdits();
+    prepareMaskPreview();
+  });
+
+  document.querySelectorAll('.mask-mode-control button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.mask-mode-control button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      maskMode = btn.dataset.maskMode;
+    });
+  });
+
+  brushSlider.addEventListener('input', () => {
+    brushRadius = Number(brushSlider.value) / 100;
+    brushLabel.textContent = `${brushSlider.value}%`;
+  });
+
+  undoMaskBtn.addEventListener('click', () => {
+    maskEdits.pop();
+    renderEditedMask();
+  });
+
+  clearMaskBtn.addEventListener('click', () => {
+    resetMaskEdits();
+    renderEditedMask();
+  });
+
+  maskCanvas.addEventListener('pointerdown', e => {
+    if (!baseMaskData) return;
+    paintingMask = true;
+    maskCanvas.setPointerCapture(e.pointerId);
+    addMaskStroke(e);
+  });
+
+  maskCanvas.addEventListener('pointermove', e => {
+    if (!paintingMask) return;
+    addMaskStroke(e);
+  });
+
+  maskCanvas.addEventListener('pointerup', e => {
+    paintingMask = false;
+    try {
+      maskCanvas.releasePointerCapture(e.pointerId);
+    } catch (err) {
+      console.error(err);
+    }
+  });
+
+  maskCanvas.addEventListener('pointercancel', () => {
+    paintingMask = false;
   });
 
   function setPreset(nextPreset) {
@@ -606,6 +1033,81 @@
       ? `${config.label} + custom`
       : config.label;
     presetMeta.textContent = `Resolution ${resolution} · threshold ${threshSlider.value}`;
+  }
+
+  function updateModeLabels() {
+    if (generationMode === 'silhouette') {
+      modeLabel.textContent = 'Flat Object';
+      modeMeta.textContent = 'Silhouette extrusion for thin/simple objects';
+    } else if (generationMode === 'auto') {
+      modeLabel.textContent = 'Auto';
+      modeMeta.textContent = 'Chooses flat extrusion for transparent/thin objects';
+    } else {
+      modeLabel.textContent = 'AI Volume';
+      modeMeta.textContent = 'Full AI reconstruction for rounded objects';
+    }
+  }
+
+  function applyObjectType(nextType) {
+    objectType = nextType;
+    const presets = {
+      auto:    { label: 'Auto',    meta: 'Adaptive defaults', mode: 'auto',       input: 'sanitized', preset: 'balanced', padding: 84, depth: 8,  bias: 0 },
+      thin:    { label: 'Thin',    meta: 'Flat, narrow objects', mode: 'silhouette', input: 'original',  preset: 'balanced', padding: 90, depth: 4,  bias: 0 },
+      icon:    { label: 'Icon',    meta: 'Logos and opaque cutouts', mode: 'silhouette', input: 'sanitized', preset: 'fast', padding: 86, depth: 6, bias: 1 },
+      rounded: { label: 'Rounded', meta: 'Full volume reconstruction', mode: 'ai', input: 'sanitized', preset: 'high', padding: 82, depth: 10, bias: 0 },
+    };
+    const config = presets[objectType] || presets.auto;
+    objectTypeLabel.textContent = config.label;
+    objectTypeMeta.textContent = config.meta;
+    setModeButton(config.mode);
+    setInputSourceButton(config.input);
+    setPresetButton(config.preset);
+    paddingSlider.value = config.padding;
+    depthSlider.value = config.depth;
+    maskBiasSlider.value = config.bias;
+    foregroundRatio = config.padding / 100;
+    extrudeDepth = config.depth / 100;
+    maskBias = config.bias;
+    document.getElementById('padding-label').textContent = `${config.padding}%`;
+    document.getElementById('depth-label').textContent = extrudeDepth.toFixed(2);
+    document.getElementById('mask-bias-label').textContent = String(maskBias);
+    resetMaskEdits();
+  }
+
+  function setModeButton(nextMode) {
+    const btn = document.querySelector(`.mode-control button[data-mode="${nextMode}"]`);
+    if (!btn) return;
+    document.querySelectorAll('.mode-control button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    generationMode = nextMode;
+    updateModeLabels();
+  }
+
+  function setInputSourceButton(nextSource) {
+    const btn = document.querySelector(`.input-source-control button[data-input-source="${nextSource}"]`);
+    if (!btn) return;
+    document.querySelectorAll('.input-source-control button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    inputSource = nextSource;
+    updateInputSourceLabels();
+  }
+
+  function setPresetButton(nextPreset) {
+    const btn = document.querySelector(`.preset-control button[data-preset="${nextPreset}"]`);
+    if (!btn) return;
+    document.querySelectorAll('.preset-control button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    setPreset(nextPreset);
+  }
+
+  function updateInputSourceLabels() {
+    if (inputSource === 'original') {
+      inputSourceLabel.textContent = 'Original';
+      inputSourceMeta.textContent = 'Preserve original framing and alpha';
+    } else {
+      inputSourceLabel.textContent = 'Sanitized';
+      inputSourceMeta.textContent = 'Remove background, crop and center object';
+    }
   }
 
   // ── Drop Zone ──
@@ -636,11 +1138,77 @@
     previewImg.style.display = 'block';
     sanitizedWrap.classList.remove('visible');
     sanitizedImg.removeAttribute('src');
+    maskCanvas.classList.remove('visible');
+    maskTools.classList.remove('visible');
+    prepareMaskBtn.classList.add('visible');
+    baseMaskData = null;
+    resetMaskEdits();
     currentPreview = null;
     currentFilename = null;
+    currentDisplayFilename = null;
+    currentDownloadFilename = null;
+    compareVisible = false;
+    showCompare(false);
     downloadBtn.classList.remove('visible');
+    resetCameraBtn.classList.remove('visible');
+    inspectBtn.classList.remove('visible');
     generateBtn.disabled = false;
     clearError();
+    scheduleMaskPreview(250);
+  }
+
+  function scheduleMaskPreview(delay = 500) {
+    if (!selectedFile) return;
+    if (preparePreviewTimer) clearTimeout(preparePreviewTimer);
+    preparePreviewTimer = setTimeout(() => prepareMaskPreview(), delay);
+  }
+
+  async function prepareMaskPreview() {
+    if (!selectedFile) return;
+    const seq = ++previewRequestSeq;
+    const form = new FormData();
+    form.append('image', selectedFile);
+    form.append('input_source', inputSource);
+    form.append('foreground_ratio', foregroundRatio);
+    form.append('alpha_threshold', alphaThreshold);
+    form.append('mask_bias', maskBias);
+    form.append('mask_edits', '[]');
+
+    prepareMaskBtn.disabled = true;
+    statusInfo.textContent = 'Preparing mask preview...';
+    try {
+      const res = await fetch('/api/preprocess', { method: 'POST', body: form });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res));
+      }
+      const data = await res.json();
+      if (seq !== previewRequestSeq) return;
+      showSanitizedPreview(data.preview, data.diagnostics?.preprocess, { preserveEdits: true });
+      statusInfo.textContent = 'Mask ready';
+    } catch (err) {
+      if (seq === previewRequestSeq) showError(err.message);
+    } finally {
+      if (seq === previewRequestSeq) prepareMaskBtn.disabled = false;
+    }
+  }
+
+  function resetMaskEdits() {
+    maskEdits = [];
+  }
+
+  function addMaskStroke(event) {
+    const rect = maskCanvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    maskEdits.push({
+      mode: maskMode,
+      x: Number(x.toFixed(4)),
+      y: Number(y.toFixed(4)),
+      radius: Number(brushRadius.toFixed(4)),
+    });
+    if (maskEdits.length > 500) maskEdits.shift();
+    renderEditedMask();
   }
 
   // ── Generate ──
@@ -653,6 +1221,14 @@
     const form = new FormData();
     form.append('image', selectedFile);
     form.append('preset', preset);
+    form.append('mode', generationMode);
+    form.append('input_source', inputSource);
+    form.append('object_type', objectType);
+    form.append('foreground_ratio', foregroundRatio);
+    form.append('extrude_depth', extrudeDepth);
+    form.append('alpha_threshold', alphaThreshold);
+    form.append('mask_bias', maskBias);
+    form.append('mask_edits', JSON.stringify(maskEdits));
     form.append('advanced', advancedMode);
     form.append('resolution', resolution);
     form.append('mc_threshold', threshSlider.value);
@@ -693,7 +1269,11 @@
         clearInterval(pollInterval);
         setGenerating(false);
         currentFilename = data.output;
-        showModel(`/api/download/${data.output}`);
+        currentDownloadFilename = data.full_output || data.output;
+        currentDisplayFilename = data.preview_output || data.output;
+        showModel(`/api/download/${currentDisplayFilename}`);
+        rememberResult(data);
+        loadHistory();
         statusInfo.textContent = doneStatusText(data);
       } else if (data.status === 'error') {
         clearInterval(pollInterval);
@@ -718,32 +1298,252 @@
   }
 
   function showModel(url) {
+    showCompare(false);
     placeholder.style.display = 'none';
     modelViewer.style.display = 'block';
     modelViewer.src = url;
     downloadBtn.classList.add('visible');
+    resetCameraBtn.classList.add('visible');
+    inspectBtn.classList.add('visible');
     statusInfo.textContent = 'Done — model ready';
   }
 
-  function showSanitizedPreview(filename, diagnostics) {
+  modelViewer.addEventListener('load', () => {
+    resetCamera(modelViewer);
+  });
+
+  function resetCamera(viewer) {
+    if (!viewer) return;
+    viewer.cameraOrbit = '0deg 75deg 105%';
+    viewer.fieldOfView = '35deg';
+    viewer.cameraTarget = 'auto auto auto';
+    if (typeof viewer.updateFraming === 'function') {
+      viewer.updateFraming();
+    }
+    if (typeof viewer.jumpCameraToGoal === 'function') {
+      viewer.jumpCameraToGoal();
+    }
+  }
+
+  function applyInspectionMode() {
+    const matte = inspectMode === 'matte';
+    [modelViewer, compareA, compareB].forEach(viewer => {
+      viewer.environmentImage = matte ? 'legacy' : 'neutral';
+      viewer.exposure = matte ? '0.7' : '0.95';
+      viewer.shadowIntensity = matte ? '0' : '0.25';
+      viewer.style.filter = matte ? 'grayscale(1) contrast(1.18)' : '';
+    });
+    inspectBtn.textContent = matte ? 'SOLID' : 'MATTE';
+  }
+
+  function showSanitizedPreview(filename, diagnostics, options = {}) {
     currentPreview = filename;
-    sanitizedImg.src = `/api/preview/${filename}`;
+    const url = `/api/preview/${filename}`;
+    sanitizedImg.src = url;
     sanitizedWrap.classList.add('visible');
+    renderMaskPreview(url, options);
 
     const warnings = diagnostics?.warnings || [];
     if (warnings.length > 0) {
-      statusInfo.textContent = `Input sanitized — ${warnings.join(', ')}`;
+      statusInfo.textContent = `Input ${diagnostics?.input_source || 'prepared'} — ${warnings.join(', ')}`;
+    }
+  }
+
+  function renderMaskPreview(url, options = {}) {
+    const img = new Image();
+    img.onload = () => {
+      const ctx = maskCanvas.getContext('2d');
+      const size = maskCanvas.width;
+      ctx.clearRect(0, 0, size, size);
+      ctx.drawImage(img, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size);
+      for (let i = 0; i < data.data.length; i += 4) {
+        const a = data.data[i + 3];
+        data.data[i] = a;
+        data.data[i + 1] = a;
+        data.data[i + 2] = a;
+        data.data[i + 3] = 255;
+      }
+      baseMaskData = new ImageData(new Uint8ClampedArray(data.data), data.width, data.height);
+      ctx.putImageData(baseMaskData, 0, 0);
+      if (!options.preserveEdits) {
+        resetMaskEdits();
+      }
+      renderEditedMask();
+      maskCanvas.classList.add('visible');
+      maskTools.classList.add('visible');
+      prepareMaskBtn.classList.add('visible');
+    };
+    img.src = url;
+  }
+
+  function renderEditedMask() {
+    if (!baseMaskData) return;
+    const ctx = maskCanvas.getContext('2d');
+    const data = new ImageData(
+      new Uint8ClampedArray(baseMaskData.data),
+      baseMaskData.width,
+      baseMaskData.height
+    );
+    maskEdits.forEach(stroke => applyStrokeToMaskData(data, stroke));
+    ctx.putImageData(data, 0, 0);
+  }
+
+  function applyStrokeToMaskData(data, stroke) {
+    const width = data.width;
+    const height = data.height;
+    const cx = stroke.x * width;
+    const cy = stroke.y * height;
+    const radius = stroke.radius * Math.max(width, height);
+    const minX = Math.max(0, Math.floor(cx - radius));
+    const maxX = Math.min(width - 1, Math.ceil(cx + radius));
+    const minY = Math.max(0, Math.floor(cy - radius));
+    const maxY = Math.min(height - 1, Math.ceil(cy + radius));
+    const r2 = radius * radius;
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        const idx = (y * width + x) * 4;
+        const value = stroke.mode === 'restore'
+          ? baseMaskData.data[idx]
+          : 0;
+        data.data[idx] = value;
+        data.data[idx + 1] = value;
+        data.data[idx + 2] = value;
+        data.data[idx + 3] = 255;
+      }
     }
   }
 
   function doneStatusText(data) {
-    const mesh = data.diagnostics?.mesh;
+    const mesh = data.diagnostics?.mesh || data.diagnostics?.silhouette;
     const output = data.diagnostics?.output;
     if (!mesh || !output) return 'Done — model ready';
 
     const faces = Intl.NumberFormat().format(mesh.faces || 0);
     const mb = ((output.file_size_bytes || 0) / 1024 / 1024).toFixed(1);
-    return `Done — ${faces} faces · ${mb} MB`;
+    const timings = data.stage_timings || data.diagnostics?.timings || {};
+    const total = Object.values(timings).reduce((sum, item) => (
+      sum + Number(item?.duration_seconds || 0)
+    ), 0);
+    const suffix = total > 0 ? ` · ${total.toFixed(1)}s` : '';
+    return `Done — ${faces} faces · ${mb} MB${suffix}`;
+  }
+
+  function rememberResult(data) {
+    const output = data.diagnostics?.output || {};
+    const effectiveMode = output.effective_mode || data.settings?.effective_mode || data.settings?.mode || generationMode;
+    const source = data.diagnostics?.preprocess?.input_source || inputSource;
+    resultHistory.unshift({
+      filename: data.full_output || data.output,
+      previewFilename: data.preview_output || data.output,
+      url: `/api/download/${data.preview_output || data.output}`,
+      downloadUrl: `/api/download/${data.full_output || data.output}`,
+      label: `${effectiveMode} · ${source}`,
+    });
+    resultHistory = resultHistory.slice(0, 4);
+    compareBtn.classList.toggle('visible', resultHistory.length >= 2);
+  }
+
+  function showCompare(active) {
+    compareVisible = active && resultHistory.length >= 2;
+    if (compareVisible) {
+      placeholder.style.display = 'none';
+      modelViewer.style.display = 'none';
+      compareWrap.classList.add('visible');
+      compareA.src = resultHistory[1].url;
+      compareB.src = resultHistory[0].url;
+      compareALabel.textContent = resultHistory[1].label;
+      compareBLabel.textContent = resultHistory[0].label;
+      resetCamera(compareA);
+      resetCamera(compareB);
+      applyInspectionMode();
+      compareBtn.textContent = 'SINGLE';
+    } else {
+      compareWrap.classList.remove('visible');
+      compareBtn.textContent = 'COMPARE';
+    }
+  }
+
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/history?limit=8');
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = data.items || [];
+      renderHistory(items);
+      if (items.length >= 2) {
+        resultHistory = items.map(historyResultFromItem).slice(0, 4);
+        compareBtn.classList.toggle('visible', resultHistory.length >= 2);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  function renderHistory(items) {
+    historyList.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'history-empty';
+      empty.textContent = 'No finished jobs yet';
+      historyList.appendChild(empty);
+      return;
+    }
+
+    items.forEach(item => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'history-item';
+      const title = document.createElement('strong');
+      title.textContent = historyTitle(item);
+      const meta = document.createElement('span');
+      meta.textContent = historyMeta(item);
+      button.append(title, meta);
+      button.addEventListener('click', () => openHistoryItem(item));
+      historyList.appendChild(button);
+    });
+  }
+
+  function historyResultFromItem(item) {
+    const previewFilename = item.preview_output || item.output;
+    const fullFilename = item.full_output || item.output;
+    return {
+      filename: fullFilename,
+      previewFilename,
+      url: `/api/download/${previewFilename}`,
+      downloadUrl: `/api/download/${fullFilename}`,
+      label: historyTitle(item),
+    };
+  }
+
+  function openHistoryItem(item) {
+    const result = historyResultFromItem(item);
+    currentFilename = item.output || result.filename;
+    currentDisplayFilename = result.previewFilename;
+    currentDownloadFilename = result.filename;
+    showModel(result.url);
+    if (item.preview) {
+      showSanitizedPreview(item.preview, item.diagnostics?.preprocess, { preserveEdits: false });
+    }
+    statusInfo.textContent = doneStatusText(item);
+  }
+
+  function historyTitle(item) {
+    const output = item.diagnostics?.output || {};
+    const mode = output.effective_mode || item.settings?.effective_mode || item.settings?.mode || 'auto';
+    const source = item.diagnostics?.preprocess?.input_source || item.settings?.input_source || 'input';
+    return `${mode} · ${source}`;
+  }
+
+  function historyMeta(item) {
+    const completedAt = item.completed_at ? new Date(item.completed_at * 1000) : null;
+    const when = completedAt ? completedAt.toLocaleString() : 'finished job';
+    const faces = item.diagnostics?.mesh?.faces || item.diagnostics?.silhouette?.faces;
+    return faces ? `${when} · ${Intl.NumberFormat().format(faces)} faces` : when;
   }
 
   function showError(msg) {
@@ -770,11 +1570,33 @@
 
   // ── Download ──
   downloadBtn.addEventListener('click', () => {
-    if (!currentFilename) return;
+    const filename = currentDownloadFilename || currentFilename;
+    if (!filename) return;
     const a = document.createElement('a');
-    a.href = `/api/download/${currentFilename}`;
-    a.download = currentFilename;
+    a.href = `/api/download/${filename}`;
+    a.download = filename;
     a.click();
+  });
+
+  resetCameraBtn.addEventListener('click', () => {
+    if (compareVisible) {
+      resetCamera(compareA);
+      resetCamera(compareB);
+    } else {
+      resetCamera(modelViewer);
+    }
+  });
+
+  inspectBtn.addEventListener('click', () => {
+    inspectMode = inspectMode === 'material' ? 'matte' : 'material';
+    applyInspectionMode();
+  });
+
+  compareBtn.addEventListener('click', () => {
+    showCompare(!compareVisible);
+    if (!compareVisible && currentDisplayFilename) {
+      showModel(`/api/download/${currentDisplayFilename}`);
+    }
   });
 </script>
 </body>
