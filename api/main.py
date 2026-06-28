@@ -11,6 +11,12 @@ from api.services.model_service import model_service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[Server] Starting up...")
+    cleanup = model_service.cleanup_outputs()
+    if cleanup["removed_count"] or cleanup["error_count"]:
+        print(
+            "[Server] Output cleanup: "
+            f"{cleanup['removed_count']} removed, {cleanup['error_count']} errors"
+        )
     yield
     print("[Server] Shutting down...")
     model_service.unload()
@@ -33,3 +39,9 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "device": model_service.device_name}
+
+
+def serve():
+    import uvicorn
+
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8080, reload=True)

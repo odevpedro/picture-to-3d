@@ -1,4 +1,6 @@
 import io
+import json
+from pathlib import Path, PurePath, PureWindowsPath
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse
@@ -20,6 +22,15 @@ MIN_RESOLUTION = 64
 MAX_RESOLUTION = 384
 MIN_MC_THRESHOLD = 1.0
 MAX_MC_THRESHOLD = 80.0
+MIN_FOREGROUND_RATIO = 0.55
+MAX_FOREGROUND_RATIO = 0.95
+MIN_EXTRUDE_DEPTH = 0.01
+MAX_EXTRUDE_DEPTH = 0.30
+MIN_ALPHA_THRESHOLD = 1
+MAX_ALPHA_THRESHOLD = 254
+MIN_MASK_BIAS = -8
+MAX_MASK_BIAS = 8
+MAX_MASK_EDITS = 500
 GENERATION_PRESETS = {
     "fast": {
         "resolution": 128,
@@ -44,6 +55,14 @@ async def generate(
     image: UploadFile = File(...),
     preset: str = Form("balanced"),
     advanced: bool = Form(False),
+    mode: str = Form("auto"),
+    input_source: str = Form("sanitized"),
+    object_type: str = Form("auto"),
+    foreground_ratio: float = Form(0.84),
+    extrude_depth: float = Form(0.08),
+    alpha_threshold: int = Form(8),
+    mask_bias: int = Form(0),
+    mask_edits: str = Form("[]"),
     resolution: int   = Form(256),
     mc_threshold: float = Form(25.0),
 ):
@@ -61,10 +80,57 @@ async def generate(
     _validate_upload_size(image_bytes)
     image_info = _validate_image_bytes(image_bytes)
 
-    params = _resolve_generation_params(preset, advanced, resolution, mc_threshold)
+    params = _resolve_generation_params(
+        preset,
+        advanced,
+        mode,
+        input_source,
+        object_type,
+        foreground_ratio,
+        extrude_depth,
+        alpha_threshold,
+        mask_bias,
+        mask_edits,
+        resolution,
+        mc_threshold,
+    )
     params["input"] = image_info
     job_id = model_service.submit(image_bytes, params)
     return {"job_id": job_id, "params": params}
+
+
+@router.post("/preprocess")
+async def preprocess(
+    image: UploadFile = File(...),
+    input_source: str = Form("sanitized"),
+    foreground_ratio: float = Form(0.84),
+    alpha_threshold: int = Form(8),
+    mask_bias: int = Form(0),
+    mask_edits: str = Form("[]"),
+):
+    if not image.content_type or not image.content_type.startswith("image/"):
+        _bad_request("invalid_content_type", "File must be an image")
+    if image.content_type not in SUPPORTED_CONTENT_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_CONTENT_TYPES))
+        _bad_request(
+            "unsupported_image_type",
+            f"Unsupported image type. Supported types: {supported}",
+            {"content_type": image.content_type},
+        )
+
+    image_bytes = await image.read()
+    _validate_upload_size(image_bytes)
+    image_info = _validate_image_bytes(image_bytes)
+    params = _resolve_preprocess_params(
+        input_source,
+        foreground_ratio,
+        alpha_threshold,
+        mask_bias,
+        mask_edits,
+    )
+    params["input"] = image_info
+    preview_result = model_service.prepare_preview(image_bytes, params)
+    return {"params": params, **preview_result}
 
 
 @router.get("/status/{job_id}")
@@ -78,18 +144,22 @@ async def status(job_id: str):
         "progress": job.progress,
         "step":     job.step,
         "output":   job.output,
+        "full_output": getattr(job, "full_output", None) or job.output,
+        "preview_output": getattr(job, "preview_output", None) or job.output,
         "preview":  job.preview,
         "error":    job.error,
         "diagnostics": job.diagnostics,
+        "stage_timings": getattr(job, "stage_timings", None),
+        "created_at": getattr(job, "created_at", None),
+        "updated_at": getattr(job, "updated_at", None),
+        "completed_at": getattr(job, "completed_at", None),
+        "settings": getattr(job, "settings", None),
     }
 
 
 @router.get("/download/{filename}")
 async def download(filename: str):
-    # Security: no path traversal
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "Invalid filename")
-    path = OUTPUTS_DIR / filename
+    path = _resolve_safe_file(OUTPUTS_DIR, filename, expected_suffix=".glb")
     if not path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(
@@ -101,10 +171,7 @@ async def download(filename: str):
 
 @router.get("/preview/{filename}")
 async def preview(filename: str):
-    # Security: no path traversal
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "Invalid filename")
-    path = PREVIEWS_DIR / filename
+    path = _resolve_safe_file(PREVIEWS_DIR, filename, expected_suffix=".png")
     if not path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(
@@ -119,6 +186,24 @@ async def device_info():
     return {"device": model_service.device_name}
 
 
+@router.get("/history")
+async def history(limit: int = 20):
+    return model_service.list_history(limit=limit)
+
+
+@router.post("/cleanup")
+async def cleanup_outputs(
+    dry_run: bool = False,
+    max_age_days: int | None = None,
+    max_files: int | None = None,
+):
+    return model_service.cleanup_outputs(
+        dry_run=dry_run,
+        max_age_days=max_age_days,
+        max_files=max_files,
+    )
+
+
 def _bad_request(code: str, message: str, meta: dict | None = None):
     raise HTTPException(
         status_code=400,
@@ -128,6 +213,20 @@ def _bad_request(code: str, message: str, meta: dict | None = None):
             "meta": meta or {},
         },
     )
+
+
+def _resolve_safe_file(base_dir: Path, filename: str, *, expected_suffix: str) -> Path:
+    if not filename or filename in {".", ".."}:
+        raise HTTPException(400, "Invalid filename")
+
+    posix_name = PurePath(filename).name
+    windows_name = PureWindowsPath(filename).name
+    if filename != posix_name or filename != windows_name or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    if not filename.lower().endswith(expected_suffix):
+        raise HTTPException(400, "Invalid filename")
+
+    return base_dir / filename
 
 
 def _validate_upload_size(image_bytes: bytes):
@@ -181,12 +280,28 @@ def _clamp_int(value: int, minimum: int, maximum: int) -> int:
 
 
 def _clamp_float(value: float, minimum: float, maximum: float) -> float:
-    return max(minimum, min(maximum, float(value)))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        _bad_request(
+            "invalid_numeric_value",
+            "Numeric parameter is invalid",
+            {"value": str(value)},
+        )
+    return max(minimum, min(maximum, parsed))
 
 
 def _resolve_generation_params(
     preset: str,
     advanced: bool,
+    mode: str,
+    input_source: str,
+    object_type: str,
+    foreground_ratio: float,
+    extrude_depth: float,
+    alpha_threshold: int,
+    mask_bias: int,
+    mask_edits: str,
     resolution: int,
     mc_threshold: float,
 ) -> dict:
@@ -209,4 +324,119 @@ def _resolve_generation_params(
 
     resolved["preset"] = preset_key
     resolved["advanced"] = advanced
+    resolved["mode"] = _resolve_generation_mode(mode)
+    resolved["input_source"] = _resolve_input_source(input_source)
+    resolved["object_type"] = _resolve_object_type(object_type)
+    resolved["foreground_ratio"] = _clamp_float(
+        foreground_ratio,
+        MIN_FOREGROUND_RATIO,
+        MAX_FOREGROUND_RATIO,
+    )
+    resolved["extrude_depth"] = _clamp_float(
+        extrude_depth,
+        MIN_EXTRUDE_DEPTH,
+        MAX_EXTRUDE_DEPTH,
+    )
+    resolved["alpha_threshold"] = _clamp_int(
+        alpha_threshold,
+        MIN_ALPHA_THRESHOLD,
+        MAX_ALPHA_THRESHOLD,
+    )
+    resolved["mask_bias"] = _clamp_int(mask_bias, MIN_MASK_BIAS, MAX_MASK_BIAS)
+    resolved["mask_edits"] = _resolve_mask_edits(mask_edits)
     return resolved
+
+
+def _resolve_preprocess_params(
+    input_source: str,
+    foreground_ratio: float,
+    alpha_threshold: int,
+    mask_bias: int,
+    mask_edits: str,
+) -> dict:
+    return {
+        "input_source": _resolve_input_source(input_source),
+        "foreground_ratio": _clamp_float(
+            foreground_ratio,
+            MIN_FOREGROUND_RATIO,
+            MAX_FOREGROUND_RATIO,
+        ),
+        "alpha_threshold": _clamp_int(
+            alpha_threshold,
+            MIN_ALPHA_THRESHOLD,
+            MAX_ALPHA_THRESHOLD,
+        ),
+        "mask_bias": _clamp_int(mask_bias, MIN_MASK_BIAS, MAX_MASK_BIAS),
+        "mask_edits": _resolve_mask_edits(mask_edits),
+    }
+
+
+def _resolve_generation_mode(mode: str) -> str:
+    mode_key = mode.strip().lower()
+    supported = {"auto", "ai", "silhouette"}
+    if mode_key not in supported:
+        _bad_request(
+            "invalid_generation_mode",
+            "Invalid generation mode",
+            {"mode": mode, "supported": sorted(supported)},
+        )
+    return mode_key
+
+
+def _resolve_input_source(input_source: str) -> str:
+    source_key = input_source.strip().lower()
+    supported = {"sanitized", "original"}
+    if source_key not in supported:
+        _bad_request(
+            "invalid_input_source",
+            "Invalid model input source",
+            {"input_source": input_source, "supported": sorted(supported)},
+        )
+    return source_key
+
+
+def _resolve_object_type(object_type: str) -> str:
+    object_type_key = object_type.strip().lower()
+    supported = {"auto", "thin", "icon", "rounded"}
+    if object_type_key not in supported:
+        _bad_request(
+            "invalid_object_type",
+            "Invalid object type preset",
+            {"object_type": object_type, "supported": sorted(supported)},
+        )
+    return object_type_key
+
+
+def _resolve_mask_edits(mask_edits: str) -> list[dict]:
+    if not mask_edits:
+        return []
+    try:
+        parsed = json.loads(mask_edits)
+    except json.JSONDecodeError:
+        _bad_request("invalid_mask_edits", "Manual mask edits must be valid JSON")
+
+    if not isinstance(parsed, list):
+        _bad_request("invalid_mask_edits", "Manual mask edits must be a list")
+    if len(parsed) > MAX_MASK_EDITS:
+        _bad_request(
+            "too_many_mask_edits",
+            f"Manual mask edits are limited to {MAX_MASK_EDITS} strokes",
+            {"count": len(parsed), "max": MAX_MASK_EDITS},
+        )
+
+    edits = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("mode", "erase")).strip().lower()
+        if mode not in {"erase", "restore"}:
+            continue
+        edits.append(
+            {
+                "mode": mode,
+                "x": _clamp_float(item.get("x", 0.5), 0.0, 1.0),
+                "y": _clamp_float(item.get("y", 0.5), 0.0, 1.0),
+                "radius": _clamp_float(item.get("radius", 0.04), 0.002, 0.3),
+            }
+        )
+    return edits

@@ -3,6 +3,7 @@ Model service — TripoSR image-to-3D with ROCm/CUDA GPU support.
 Falls back to CPU if no GPU is available.
 """
 import io
+import json
 import os
 import time
 import uuid
@@ -13,6 +14,7 @@ from typing import Optional, Dict
 
 from api.services.image_preprocess_service import image_preprocess_service
 from api.services.mesh_postprocess_service import mesh_postprocess_service
+from api.services.silhouette_extrude_service import silhouette_extrude_service
 
 # ------------------------------------------------------------------ #
 # Ensure torch can find its HIP/CUDA libraries at runtime
@@ -30,8 +32,6 @@ def _setup_runtime_libs():
             ctypes.CDLL(nvrtc, mode=ctypes.RTLD_GLOBAL)
     except Exception:
         pass
-
-_setup_runtime_libs()
 
 # ------------------------------------------------------------------ #
 # Device detection
@@ -55,13 +55,35 @@ def _get_device():
 # Paths
 # ------------------------------------------------------------------ #
 
-_BASE = Path.home() / ".local" / "share" / "image3d"
+_BASE = Path(os.environ.get("IMAGE3D_DATA_DIR", Path.home() / ".local" / "share" / "image3d"))
 
 MODELS_DIR  = _BASE / "models"
 OUTPUTS_DIR = _BASE / "outputs"
 PREVIEWS_DIR = _BASE / "previews"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUTPUT_RETENTION_DAYS = 14
+DEFAULT_MAX_OUTPUT_FILES = 100
+
+
+def _ensure_storage_dirs():
+    for path in (MODELS_DIR, OUTPUTS_DIR, PREVIEWS_DIR):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"[ModelService] Could not create storage directory {path}: {exc}")
+
+
+_ensure_storage_dirs()
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 # ------------------------------------------------------------------ #
@@ -186,15 +208,26 @@ def _ensure_weights(models_dir: Path) -> Path:
 # ------------------------------------------------------------------ #
 
 class Job:
-    def __init__(self, job_id: str):
+    def __init__(self, job_id: str, settings: dict | None = None):
+        now = time.time()
         self.job_id   = job_id
         self.status   = "pending"
         self.progress = 0
         self.step     = ""
         self.output   = None
+        self.full_output = None
+        self.preview_output = None
         self.preview  = None
         self.error    = None
+        self.settings = settings or {}
         self.diagnostics = {}
+        self.stage_timings = {}
+        self.created_at = now
+        self.updated_at = now
+        self.completed_at = None
+
+    def touch(self):
+        self.updated_at = time.time()
 
 
 # ------------------------------------------------------------------ #
@@ -205,13 +238,25 @@ class ModelService:
     def __init__(self):
         self._model      = None
         self._lock       = threading.Lock()
+        self._jobs_lock  = threading.Lock()
         self._jobs: Dict[str, Job] = {}
+        self._max_jobs   = 100
+        self.output_retention_days = _env_positive_int(
+            "IMAGE3D_OUTPUT_RETENTION_DAYS",
+            DEFAULT_OUTPUT_RETENTION_DAYS,
+        )
+        self.max_output_files = _env_positive_int(
+            "IMAGE3D_MAX_OUTPUT_FILES",
+            DEFAULT_MAX_OUTPUT_FILES,
+        )
         self.device      = None
         self.device_name = "not loaded"
 
     def _load(self):
         if self._model is not None:
             return
+
+        _setup_runtime_libs()
 
         import sys, torch
 
@@ -259,79 +304,159 @@ class ModelService:
         self._model = None
 
     def get_job(self, job_id: str) -> Optional[Job]:
-        return self._jobs.get(job_id)
+        with self._jobs_lock:
+            return self._jobs.get(job_id)
 
     def submit(self, image_bytes: bytes, params: dict) -> str:
         job_id = str(uuid.uuid4())
-        job    = Job(job_id)
+        job    = Job(job_id, settings=params)
         job.diagnostics["request"] = params
-        self._jobs[job_id] = job
+        with self._jobs_lock:
+            self._prune_jobs_locked()
+            self._jobs[job_id] = job
         threading.Thread(target=self._run, args=(job, image_bytes, params), daemon=True).start()
         return job_id
 
-    def _run(self, job: Job, image_bytes: bytes, params: dict):
-        import torch
+    def prepare_preview(self, image_bytes: bytes, params: dict) -> dict:
+        preview_id = f"preview_{uuid.uuid4().hex[:12]}"
+        started = time.perf_counter()
+        result = self._preprocess(
+            image_bytes,
+            preview_id,
+            input_source=str(params.get("input_source", "sanitized")),
+            foreground_ratio=float(params.get("foreground_ratio", 0.84)),
+            alpha_threshold=int(params.get("alpha_threshold", 8)),
+            mask_bias=int(params.get("mask_bias", 0)),
+            mask_edits=params.get("mask_edits") or [],
+        )
+        return {
+            "preview": result.preview_filename,
+            "diagnostics": {
+                "preprocess": result.diagnostics,
+                "timings": {
+                    "preprocess": {
+                        "duration_seconds": round(time.perf_counter() - started, 3),
+                    },
+                },
+            },
+        }
 
+    def _run(self, job: Job, image_bytes: bytes, params: dict):
         job.status = "running"
+        job.touch()
         try:
-            job.progress, job.step = 2,  "Sanitizing image..."
-            preprocess_result = self._preprocess(image_bytes, job.job_id)
+            import torch
+
+            stage_started = self._start_stage(job, "preprocess", 2, "Sanitizing image...")
+            preprocess_result = self._preprocess(
+                image_bytes,
+                job.job_id,
+                input_source=str(params.get("input_source", "sanitized")),
+                foreground_ratio=float(params.get("foreground_ratio", 0.84)),
+                alpha_threshold=int(params.get("alpha_threshold", 8)),
+                mask_bias=int(params.get("mask_bias", 0)),
+                mask_edits=params.get("mask_edits") or [],
+            )
+            self._finish_stage(job, "preprocess", stage_started)
             image = preprocess_result.image
+            rgba_image = preprocess_result.rgba
             job.preview = preprocess_result.preview_filename
             job.diagnostics["preprocess"] = preprocess_result.diagnostics
 
-            job.progress, job.step = 10, "Loading model..."
+            mode = self._effective_generation_mode(params, preprocess_result.diagnostics)
+            params["effective_mode"] = mode
+            job.diagnostics["request"] = params
+            if mode == "silhouette":
+                stage_started = self._start_stage(job, "silhouette", 35, "Extruding silhouette...")
+                result = silhouette_extrude_service.process(
+                    rgba_image,
+                    preprocess_result.alpha,
+                    depth_scale=float(params.get("extrude_depth", 0.08)),
+                )
+                self._finish_stage(job, "silhouette", stage_started)
+                job.diagnostics["silhouette"] = result.diagnostics
+                self._export_mesh(job, result.mesh, params)
+                return
+
+            stage_started = self._start_stage(job, "load_model", 10, "Loading model...")
             with self._lock:
                 self._load()
+            self._finish_stage(job, "load_model", stage_started)
 
-            job.progress, job.step = 15, "Generating 3D shape..."
+            stage_started = self._start_stage(job, "inference", 15, "Generating 3D shape...")
             resolution   = int(params.get("resolution",    256))
             mc_threshold = float(params.get("mc_threshold", 25.0))
 
             with torch.no_grad():
                 scene_codes = self._model(image, device=self.device)
+            self._finish_stage(job, "inference", stage_started)
 
-            job.progress, job.step = 70, "Extracting mesh..."
+            stage_started = self._start_stage(job, "extract_mesh", 70, "Extracting mesh...")
             mesh = self._model.extract_mesh(
                 scene_codes,
                 True,                   # has_vertex_color
                 resolution=resolution,
                 threshold=mc_threshold,
             )[0]
+            self._finish_stage(job, "extract_mesh", stage_started)
 
-            job.progress, job.step = 84, "Cleaning mesh..."
+            stage_started = self._start_stage(job, "postprocess_mesh", 84, "Cleaning mesh...")
             mesh, mesh_diagnostics = self._postprocess_mesh(mesh, params)
+            self._finish_stage(job, "postprocess_mesh", stage_started)
             job.diagnostics["mesh"] = mesh_diagnostics
 
-            job.progress, job.step = 92, "Exporting GLB..."
-            filename = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
-            out_path = OUTPUTS_DIR / filename
-            mesh.export(str(out_path))
-            job.diagnostics["output"] = {
-                "filename": filename,
-                "file_size_bytes": out_path.stat().st_size,
-                "resolution": resolution,
-                "mc_threshold": mc_threshold,
-            }
-
-            job.output   = filename
-            job.progress = 100
-            job.step     = "Done"
-            job.status   = "done"
+            self._export_mesh(job, mesh, params)
 
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
             print(f"[ModelService] ERROR: {exc}\n{tb}")
             job.status = "error"
-            job.error  = tb.strip()
+            job.error  = "Generation failed. See server logs for details."
+            job.diagnostics["error"] = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            }
+            job.diagnostics["timings"] = job.stage_timings
+            job.completed_at = time.time()
+            job.touch()
 
-    def _preprocess(self, image_bytes: bytes, job_id: str):
+    def _preprocess(
+        self,
+        image_bytes: bytes,
+        job_id: str,
+        *,
+        input_source: str,
+        foreground_ratio: float,
+        alpha_threshold: int,
+        mask_bias: int,
+        mask_edits: list[dict],
+    ):
         return image_preprocess_service.prepare(
             image_bytes,
+            input_source=input_source,
+            foreground_ratio=foreground_ratio,
+            alpha_threshold=alpha_threshold,
+            mask_bias=mask_bias,
+            mask_edits=mask_edits,
             preview_dir=PREVIEWS_DIR,
             preview_stem=job_id,
         )
+
+    def _start_stage(self, job: Job, name: str, progress: int, step: str) -> float:
+        job.progress, job.step = progress, step
+        job.stage_timings.setdefault(name, {"started_at": time.time()})
+        job.diagnostics["timings"] = job.stage_timings
+        job.touch()
+        return time.perf_counter()
+
+    def _finish_stage(self, job: Job, name: str, started: float):
+        elapsed = max(0.0, time.perf_counter() - started)
+        timing = job.stage_timings.setdefault(name, {})
+        timing["duration_seconds"] = round(elapsed, 3)
+        timing["completed_at"] = time.time()
+        job.diagnostics["timings"] = job.stage_timings
+        job.touch()
 
     def _mesh_diagnostics(self, mesh) -> dict:
         vertices = getattr(mesh, "vertices", [])
@@ -361,6 +486,478 @@ class ModelService:
                 "applied": False,
             }
             return mesh, diagnostics
+
+    def _export_mesh(self, job: Job, mesh, params: dict):
+        stage_started = self._start_stage(job, "export", 92, "Exporting GLB...")
+        stem = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        filename = f"{stem}.glb"
+        preview_filename = f"{stem}_preview.glb"
+        out_path = OUTPUTS_DIR / filename
+        preview_path = OUTPUTS_DIR / preview_filename
+
+        mesh.export(str(out_path))
+        preview_mesh, preview_diagnostics = self._make_preview_mesh(mesh)
+        preview_mesh.export(str(preview_path))
+        self._finish_stage(job, "export", stage_started)
+
+        output_diagnostics = {
+            "filename": filename,
+            "full_filename": filename,
+            "preview_filename": preview_filename,
+            "file_size_bytes": out_path.stat().st_size,
+            "preview_file_size_bytes": preview_path.stat().st_size,
+            "resolution": params.get("resolution"),
+            "mc_threshold": params.get("mc_threshold"),
+            "mode": params.get("mode", "auto"),
+            "effective_mode": params.get("effective_mode", params.get("mode", "auto")),
+            "preview_mesh": preview_diagnostics,
+        }
+        job.diagnostics["output"] = {
+            **output_diagnostics,
+        }
+        job.diagnostics.setdefault("mesh", self._mesh_diagnostics(mesh))
+        job.diagnostics["timings"] = job.stage_timings
+
+        job.output = filename
+        job.full_output = filename
+        job.preview_output = preview_filename
+        job.progress = 100
+        job.step = "Done"
+        job.status = "done"
+        job.completed_at = time.time()
+        job.touch()
+        self._write_job_metadata(job)
+
+    def _make_preview_mesh(self, mesh, *, max_faces: int = 50_000):
+        faces = getattr(mesh, "faces", [])
+        face_count = len(faces)
+        diagnostics = {
+            "source_faces": int(face_count),
+            "target_faces": int(max_faces),
+            "simplified": False,
+            "faces": int(face_count),
+        }
+        if face_count <= max_faces:
+            return mesh.copy(), diagnostics
+
+        try:
+            preview_mesh = mesh.simplify_quadric_decimation(
+                face_count=max_faces,
+                aggression=7,
+            )
+            diagnostics["simplified"] = True
+            diagnostics["faces"] = int(len(getattr(preview_mesh, "faces", [])))
+            return preview_mesh, diagnostics
+        except Exception as exc:
+            diagnostics["error"] = str(exc)
+            return mesh.copy(), diagnostics
+
+    def _write_job_metadata(self, job: Job):
+        if not job.output:
+            return
+
+        metadata_path = OUTPUTS_DIR / f"{Path(job.output).stem}.json"
+        metadata = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "output": job.output,
+            "full_output": job.full_output or job.output,
+            "preview_output": job.preview_output or job.output,
+            "outputs": {
+                "full": job.full_output or job.output,
+                "preview": job.preview_output or job.output,
+            },
+            "preview": job.preview,
+            "settings": job.settings,
+            "diagnostics": job.diagnostics,
+            "stage_timings": job.stage_timings,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+            "completed_at": job.completed_at,
+        }
+        try:
+            metadata_path.write_text(
+                json.dumps(metadata, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[ModelService] Could not write job metadata: {exc}")
+
+    def _effective_generation_mode(self, params: dict, preprocess_diagnostics: dict) -> str:
+        requested = str(params.get("mode", "auto")).strip().lower()
+        if requested in {"ai", "silhouette"}:
+            return requested
+
+        object_type = str(params.get("object_type", "auto")).strip().lower()
+        if object_type in {"thin", "icon"}:
+            return "silhouette"
+        if object_type == "rounded":
+            return "ai"
+
+        if preprocess_diagnostics.get("used_source_alpha"):
+            return "silhouette"
+
+        mask_area_ratio = float(preprocess_diagnostics.get("mask_area_ratio") or 0)
+        foreground_size = preprocess_diagnostics.get("foreground_size") or [0, 0]
+        width, height = foreground_size
+        long_side = max(width, height, 1)
+        short_side = max(min(width, height), 1)
+        aspect_ratio = long_side / short_side
+
+        if mask_area_ratio <= 0.12 or aspect_ratio >= 2.8:
+            return "silhouette"
+        return "ai"
+
+    def cleanup_outputs(
+        self,
+        *,
+        dry_run: bool = False,
+        max_age_days: int | None = None,
+        max_files: int | None = None,
+    ) -> dict:
+        effective_max_age_days = self._normalize_positive_int(
+            max_age_days,
+            self.output_retention_days,
+        )
+        effective_max_files = self._normalize_positive_int(
+            max_files,
+            self.max_output_files,
+        )
+
+        outputs = self._list_files(OUTPUTS_DIR, "*.glb")
+        metadata_files = self._list_files(OUTPUTS_DIR, "*.json")
+        preview_files = self._list_files(PREVIEWS_DIR, "*.png")
+        now = time.time()
+        cutoff = now - (effective_max_age_days * 24 * 60 * 60)
+
+        output_records = []
+        errors: list[dict] = []
+        for path in outputs:
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                errors.append(self._cleanup_error(path, exc))
+                continue
+            output_records.append({"path": path, "mtime": stat.st_mtime})
+
+        planned: dict[Path, dict] = {}
+        for record in output_records:
+            if record["mtime"] < cutoff:
+                self._plan_cleanup(
+                    planned,
+                    record["path"],
+                    kind="output",
+                    reason="age",
+                )
+
+        retained_records = [
+            record for record in output_records if record["path"] not in planned
+        ]
+        retained_records.sort(key=lambda record: record["mtime"], reverse=True)
+        for record in retained_records[effective_max_files:]:
+            self._plan_cleanup(
+                planned,
+                record["path"],
+                kind="output",
+                reason="count",
+            )
+
+        metadata_by_output_name = self._metadata_by_output_name(metadata_files)
+        self._expand_associated_cleanup(planned, metadata_by_output_name)
+
+        outputs_by_stem = {path.stem: path for path in outputs}
+        retained_output_stems = {
+            path.stem for path in outputs if path not in planned
+        }
+        referenced_previews = set()
+        for metadata_path in metadata_files:
+            output_names = self._metadata_output_names(metadata_path)
+            has_retained_output = metadata_path.stem in retained_output_stems or any(
+                Path(output_name).stem in retained_output_stems
+                for output_name in output_names
+            )
+            if has_retained_output:
+                preview_name = self._metadata_preview_name(metadata_path)
+                if preview_name:
+                    referenced_previews.add(preview_name)
+
+        for metadata_path in metadata_files:
+            output_names = self._metadata_output_names(metadata_path)
+            has_output = metadata_path.stem in outputs_by_stem or any(
+                (OUTPUTS_DIR / output_name).exists()
+                for output_name in output_names
+            )
+            if has_output:
+                continue
+            if self._is_older_than(metadata_path, cutoff, errors):
+                self._plan_cleanup(
+                    planned,
+                    metadata_path,
+                    kind="metadata",
+                    reason="orphan",
+                )
+
+        for preview_path in preview_files:
+            if preview_path.name in referenced_previews:
+                continue
+            if self._is_older_than(preview_path, cutoff, errors):
+                self._plan_cleanup(
+                    planned,
+                    preview_path,
+                    kind="preview",
+                    reason="orphan",
+                )
+
+        removed = []
+        freed_bytes = 0
+        for entry in sorted(planned.values(), key=lambda item: item["filename"]):
+            path = entry.pop("path")
+            try:
+                size = path.stat().st_size
+                entry["size_bytes"] = size
+                if not dry_run:
+                    path.unlink()
+                    freed_bytes += size
+                removed.append(entry)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                errors.append(self._cleanup_error(path, exc))
+
+        return {
+            "dry_run": dry_run,
+            "retention": {
+                "max_age_days": effective_max_age_days,
+                "max_files": effective_max_files,
+            },
+            "scanned": {
+                "outputs": len(outputs),
+                "metadata": len(metadata_files),
+                "previews": len(preview_files),
+            },
+            "removed_count": len(removed),
+            "removed": removed,
+            "freed_bytes": 0 if dry_run else freed_bytes,
+            "error_count": len(errors),
+            "errors": errors,
+        }
+
+    def list_history(self, *, limit: int = 20) -> dict:
+        effective_limit = min(100, self._normalize_positive_int(limit, 20))
+        records = []
+
+        for metadata_path in self._list_files(OUTPUTS_DIR, "*.json"):
+            metadata = self._read_metadata(metadata_path)
+            if not isinstance(metadata, dict):
+                continue
+
+            full_output = self._safe_stored_filename(
+                metadata.get("full_output") or metadata.get("output"),
+                ".glb",
+            )
+            preview_output = self._safe_stored_filename(
+                metadata.get("preview_output") or full_output,
+                ".glb",
+            )
+            preview = self._safe_stored_filename(metadata.get("preview"), ".png")
+            display_output = preview_output or full_output
+            if not display_output:
+                continue
+            if not (OUTPUTS_DIR / display_output).exists() and (
+                not full_output or not (OUTPUTS_DIR / full_output).exists()
+            ):
+                continue
+
+            records.append(
+                {
+                    "job_id": metadata.get("job_id"),
+                    "status": metadata.get("status", "done"),
+                    "output": metadata.get("output") or full_output,
+                    "full_output": full_output,
+                    "preview_output": preview_output or full_output,
+                    "preview": preview,
+                    "settings": metadata.get("settings") or {},
+                    "diagnostics": metadata.get("diagnostics") or {},
+                    "stage_timings": metadata.get("stage_timings")
+                    or (metadata.get("diagnostics") or {}).get("timings")
+                    or {},
+                    "created_at": metadata.get("created_at"),
+                    "updated_at": metadata.get("updated_at"),
+                    "completed_at": metadata.get("completed_at"),
+                }
+            )
+
+        records.sort(
+            key=lambda item: item.get("completed_at")
+            or item.get("updated_at")
+            or item.get("created_at")
+            or 0,
+            reverse=True,
+        )
+        return {"count": len(records[:effective_limit]), "items": records[:effective_limit]}
+
+    def _normalize_positive_int(self, value: int | None, default: int) -> int:
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
+
+    def _list_files(self, directory: Path, pattern: str) -> list[Path]:
+        try:
+            return sorted(path for path in directory.glob(pattern) if path.is_file())
+        except OSError as exc:
+            print(f"[ModelService] Could not list {directory}: {exc}")
+            return []
+
+    def _plan_cleanup(
+        self,
+        planned: dict[Path, dict],
+        path: Path,
+        *,
+        kind: str,
+        reason: str,
+    ):
+        planned.setdefault(
+            path,
+            {
+                "path": path,
+                "filename": path.name,
+                "kind": kind,
+                "reason": reason,
+            },
+        )
+
+    def _metadata_preview_name(self, metadata_path: Path) -> str | None:
+        metadata = self._read_metadata(metadata_path)
+        if not isinstance(metadata, dict):
+            return None
+        return self._safe_stored_filename(metadata.get("preview"), ".png")
+
+    def _metadata_output_names(self, metadata_path: Path) -> set[str]:
+        metadata = self._read_metadata(metadata_path)
+        if not isinstance(metadata, dict):
+            return set()
+
+        names = set()
+        for key in ("output", "full_output", "preview_output"):
+            name = self._safe_stored_filename(metadata.get(key), ".glb")
+            if name:
+                names.add(name)
+
+        outputs = metadata.get("outputs")
+        if isinstance(outputs, dict):
+            for value in outputs.values():
+                name = self._safe_stored_filename(value, ".glb")
+                if name:
+                    names.add(name)
+
+        return names
+
+    def _metadata_by_output_name(self, metadata_files: list[Path]) -> dict[str, Path]:
+        result = {}
+        for metadata_path in metadata_files:
+            for output_name in self._metadata_output_names(metadata_path):
+                result.setdefault(output_name, metadata_path)
+            legacy_name = f"{metadata_path.stem}.glb"
+            if (OUTPUTS_DIR / legacy_name).exists():
+                result.setdefault(legacy_name, metadata_path)
+        return result
+
+    def _expand_associated_cleanup(
+        self,
+        planned: dict[Path, dict],
+        metadata_by_output_name: dict[str, Path],
+    ):
+        changed = True
+        while changed:
+            changed = False
+            planned_outputs = [
+                entry["path"]
+                for entry in planned.values()
+                if entry["kind"] == "output"
+            ]
+            for output_path in planned_outputs:
+                metadata_path = metadata_by_output_name.get(output_path.name)
+                legacy_metadata_path = OUTPUTS_DIR / f"{output_path.stem}.json"
+                if metadata_path is None and legacy_metadata_path.exists():
+                    metadata_path = legacy_metadata_path
+                if metadata_path is None or not metadata_path.exists():
+                    continue
+
+                before = len(planned)
+                self._plan_cleanup(
+                    planned,
+                    metadata_path,
+                    kind="metadata",
+                    reason="associated_output",
+                )
+                for output_name in self._metadata_output_names(metadata_path):
+                    associated_output = OUTPUTS_DIR / output_name
+                    if associated_output.exists():
+                        self._plan_cleanup(
+                            planned,
+                            associated_output,
+                            kind="output",
+                            reason="associated_output",
+                        )
+                preview_name = self._metadata_preview_name(metadata_path)
+                if preview_name:
+                    preview_path = PREVIEWS_DIR / preview_name
+                    if preview_path.exists():
+                        self._plan_cleanup(
+                            planned,
+                            preview_path,
+                            kind="preview",
+                            reason="associated_output",
+                        )
+                changed = changed or len(planned) != before
+
+    def _read_metadata(self, metadata_path: Path):
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _safe_stored_filename(self, value, expected_suffix: str) -> str | None:
+        if not isinstance(value, str):
+            return None
+        if value != Path(value).name or ".." in value:
+            return None
+        if not value.lower().endswith(expected_suffix):
+            return None
+        return value
+
+    def _is_older_than(self, path: Path, cutoff: float, errors: list[dict]) -> bool:
+        try:
+            return path.stat().st_mtime < cutoff
+        except OSError as exc:
+            errors.append(self._cleanup_error(path, exc))
+            return False
+
+    def _cleanup_error(self, path: Path, exc: OSError) -> dict:
+        return {
+            "filename": path.name,
+            "error": str(exc),
+        }
+
+    def _prune_jobs_locked(self):
+        if len(self._jobs) < self._max_jobs:
+            return
+
+        finished = sorted(
+            (
+                (job.completed_at or job.updated_at or job.created_at),
+                job_id,
+            )
+            for job_id, job in self._jobs.items()
+            if job.status in {"done", "error"}
+        )
+        remove_count = len(self._jobs) - self._max_jobs + 1
+        for _, job_id in finished[:remove_count]:
+            self._jobs.pop(job_id, None)
 
 
 model_service = ModelService()
