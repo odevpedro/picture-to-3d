@@ -1,7 +1,7 @@
 # Backlog — Image to 3D
 
 > Current project state and pending work. Updated during development.
-> Ultima atualizacao: 2026-06-28 (v0.3.0 closeout)
+> Ultima atualizacao: 2026-06-29 (product readiness backlog)
 
 ---
 
@@ -11,7 +11,15 @@
 |----------|-------|
 | Completed | 21 |
 | In Progress | 0 |
-| Pending | 6 |
+| Pending | 16 |
+
+Priority split:
+
+| Priority | Meaning | Count |
+|----------|---------|-------|
+| P0 | Required before calling the app complete for real users | 5 |
+| P1 | Strong product-readiness and quality improvements | 9 |
+| P2 | Useful expansion or research after the core app is stable | 2 |
 
 ---
 
@@ -22,6 +30,121 @@ _(none)_
 ---
 
 ## Pending
+
+### P0 — Product readiness blockers
+
+### [ ] [JOBS | Queue and resource control]
+**Run generation through a bounded worker queue instead of one thread per request**
+
+Checklist:
+- Add a single-worker queue by default, with a configurable worker limit
+- Return queue position and estimated state in `/api/status/{job_id}`
+- Reject new jobs with a structured `429` when the queue is full
+- Add job cancellation and timeout handling
+- Prevent duplicate clicks/submissions from creating unbounded GPU work
+- Add tests for queue limits, cancellation and timeout behavior
+
+Rationale:
+- Current generation starts a daemon thread per request
+- GPU inference should be serialized or explicitly bounded to avoid OOM, hangs and noisy failure modes
+
+### [ ] [SETUP | First-run and offline resilience]
+**Make first launch predictable, recoverable and clear to users**
+
+Checklist:
+- Pin TripoSR source download to a known revision instead of `main`
+- Verify downloaded source/weights with checksums or expected metadata
+- Detect partial/corrupt model caches and repair them automatically
+- Add a preflight endpoint/check for Python, torch backend, GPU, VRAM, disk and network access
+- Show first-run download/model setup progress in the UI or launcher
+- Add a documented cache warmup/offline mode for repeat installs
+
+Rationale:
+- First run currently depends on GitHub and Hugging Face availability
+- Users need clear progress and recovery when large model downloads fail
+
+### [ ] [PACKAGING | Release and install hygiene]
+**Make the project installable and releasable without tribal knowledge**
+
+Checklist:
+- Add the missing `LICENSE` file or update README/license metadata if not MIT
+- Move runtime dependencies into `pyproject.toml` or document why `requirements.txt` is canonical
+- Make CI install from the same dependency source users install from
+- Add release notes/changelog for user-facing versions
+- Add Docker Compose profiles for CPU and future GPU modes
+- Document supported platforms as tested/experimental/unsupported
+
+Rationale:
+- The app works locally, but packaging metadata and release flow are still prototype-level
+
+### [ ] [UX | Error recovery and retry]
+**Make failures actionable instead of only visible**
+
+Checklist:
+- Show connection loss, missing job, model-load failure and download failure as distinct UI states
+- Add retry generation with the same resolved settings
+- Add reconnect/backoff behavior while polling status
+- Add a cancel button while a job is pending or running
+- Preserve the latest selected image/settings after a recoverable failure
+
+Rationale:
+- Users should be able to recover from common runtime failures without refreshing or reading server logs
+
+### [ ] [SECURITY | Local network hardening]
+**Default to safer local-only behavior unless the user opts into LAN exposure**
+
+Checklist:
+- Default launchers to `127.0.0.1` instead of `0.0.0.0`
+- Add an explicit launcher/config option for LAN access
+- Add restricted CORS defaults
+- Consider an optional local access token when binding outside localhost
+- Document the security model for local and LAN use
+
+Rationale:
+- The app has unauthenticated upload, generation and download routes
+- Local tools should avoid exposing heavy compute endpoints to the network by default
+
+### P1 — Product polish and quality
+
+### [ ] [QA | Quality regression suite]
+**Create repeatable checks for generation quality across known input types**
+
+Checklist:
+- Add a small curated sample set for rounded objects, icons, thin objects and transparent PNGs
+- Store expected metadata ranges for mode choice, face counts, file sizes and warnings
+- Save reference screenshots/GLBs for manual visual comparison
+- Document a GPU/manual QA checklist before releases
+- Track regressions when presets, preprocessing or mesh cleanup changes
+
+Rationale:
+- Without fixed examples, quality changes are subjective and hard to evaluate across releases
+
+### [ ] [PRIVACY | Local data controls]
+**Give users direct control over generated files and history**
+
+Checklist:
+- Add delete action for a single history item
+- Add clear-all history and outputs action with confirmation
+- Show total disk usage for models, outputs and previews
+- Add "open output folder" guidance or launcher support per platform
+- Explain retention policy in the UI or README
+
+Rationale:
+- The service stores images, generated GLBs and metadata locally
+- Users should be able to inspect and remove their own generated data
+
+### [ ] [FRONTEND | Bundled viewer assets]
+**Remove runtime dependency on CDN assets**
+
+Checklist:
+- Bundle or vendor the `<model-viewer>` dependency locally
+- Add a clear fallback if the viewer script fails to load
+- Add a basic Content Security Policy suitable for the static app
+- Verify the app works offline after dependencies and models are cached
+
+Rationale:
+- The frontend currently depends on an external CDN at runtime
+- A local desktop-style tool should remain usable offline after setup
 
 ### [ ] [MODEL | Generation presets]
 **Replace raw resolution/threshold controls with safer presets**
@@ -101,6 +224,8 @@ Checklist:
 Rationale:
 - It is hard to know whether a bad result came from input crop, model inference, threshold, or viewer rendering
 
+### P2 — Expansion and research
+
 ### [ ] [RESEARCH | Alternative mesh extraction]
 **Investigate alternatives to current marching-cubes extraction**
 
@@ -113,6 +238,19 @@ Checklist:
 Rationale:
 - The current patch is pragmatic for ROCm compatibility
 - Quality tradeoffs should be measured instead of assumed
+
+### [ ] [EXPORT | Additional output formats]
+**Support common downstream workflows beyond GLB download**
+
+Checklist:
+- Add OBJ export for DCC tools
+- Add STL export for simple 3D printing workflows when color is not required
+- Investigate USDZ export for Apple AR preview
+- Keep GLB as the primary format and document limitations for each additional format
+
+Rationale:
+- Users may want generated assets for modeling tools, printing or AR viewers
+- Extra formats should be added only after GLB generation remains stable
 
 ---
 
