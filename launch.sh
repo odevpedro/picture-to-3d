@@ -13,8 +13,16 @@ if ! command -v uv &>/dev/null; then
     exit 1
 fi
 
+needs_setup=0
+if [ ! -f ".deps_installed" ] || [ ! -x ".venv/bin/python" ]; then
+    needs_setup=1
+elif ! .venv/bin/python -c "import torch; raise SystemExit(0 if getattr(torch.version, 'hip', None) else 1)" >/dev/null 2>&1; then
+    echo "[SETUP] Existing environment is missing ROCm torch; reinstalling GPU dependencies..."
+    needs_setup=1
+fi
+
 # Create venv + install deps if needed
-if [ ! -f ".deps_installed" ]; then
+if [ "$needs_setup" -eq 1 ]; then
     echo "[SETUP] Creating virtual environment and installing dependencies..."
     uv venv --python 3.12
     # Install torch + torchvision from the ROCm index first
@@ -28,8 +36,17 @@ if [ ! -f ".deps_installed" ]; then
 fi
 
 # Start server
+HOST="${IMAGE3D_HOST:-127.0.0.1}"
+PORT="${IMAGE3D_PORT:-8080}"
+if [ "${IMAGE3D_LAN:-0}" = "1" ]; then
+    HOST="0.0.0.0"
+fi
 echo "[INFO] Starting server..."
-echo "[INFO] Open http://localhost:8080 in your browser"
+echo "[INFO] Binding to ${HOST}:${PORT}"
+echo "[INFO] Open http://localhost:${PORT} in your browser"
+if [ "$HOST" = "0.0.0.0" ]; then
+    echo "[WARN] LAN exposure is enabled. Upload and generation routes are unauthenticated."
+fi
 echo "[INFO] Press CTRL+C to stop"
 echo ""
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8080 --reload
+uv run --no-sync uvicorn api.main:app --host "$HOST" --port "$PORT" --reload

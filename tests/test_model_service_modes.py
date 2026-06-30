@@ -1,4 +1,6 @@
-from api.services.model_service import ModelService
+import pytest
+
+from api.services.model_service import JobQueueFull, ModelService
 
 
 def test_auto_mode_uses_silhouette_for_source_alpha():
@@ -77,3 +79,40 @@ def test_object_type_overrides_auto_mode():
 
     assert thin == "silhouette"
     assert rounded == "ai"
+
+
+def test_submit_uses_bounded_queue_without_starting_generation():
+    service = ModelService(worker_count=1, max_queue_size=1, start_workers=False)
+
+    job_id = service.submit(b"image-a", {"preset": "fast"})
+    job = service.get_job(job_id)
+
+    assert job.status == "pending"
+    assert job.queue_position == 1
+    assert job.step == "Queued (1)"
+
+    with pytest.raises(JobQueueFull):
+        service.submit(b"image-b", {"preset": "fast"})
+
+
+def test_submit_reuses_active_duplicate_job():
+    service = ModelService(worker_count=1, max_queue_size=1, start_workers=False)
+
+    first = service.submit(b"same-image", {"preset": "balanced"})
+    second = service.submit(b"same-image", {"preset": "balanced"})
+
+    assert second == first
+    assert len(service._jobs) == 1
+    assert service.get_job(first).diagnostics["duplicate_submissions"] == 1
+
+
+def test_cancel_pending_job_marks_terminal_and_frees_submission_key():
+    service = ModelService(worker_count=1, max_queue_size=1, start_workers=False)
+    job_id = service.submit(b"image-a", {"preset": "fast"})
+
+    job = service.cancel_job(job_id)
+
+    assert job.status == "cancelled"
+    assert job.queue_position is None
+    assert job.completed_at is not None
+    assert service.submit(b"image-a", {"preset": "fast"}) != job_id

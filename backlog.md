@@ -1,25 +1,44 @@
 # Backlog — Image to 3D
 
 > Current project state and pending work. Updated during development.
-> Ultima atualizacao: 2026-06-29 (product readiness backlog)
+> Ultima atualizacao: 2026-06-30 (queue, setup, security and offline frontend pass)
 
 ---
 
 ## Status Summary
 
+Functional core:
+- [x] Upload image, validate input and preprocess/mask it
+- [x] Preview/edit mask before generation
+- [x] Generate GLB through AI volume or flat silhouette mode
+- [x] View generated GLB in-browser and download the full GLB
+- [x] Persist completed job history from metadata sidecars
+- [x] Bound GPU work through queue, retry/cancel jobs and run offline after warmup
+
+Current product call:
+- The main app workflow is implemented end-to-end.
+- The biggest remaining app-facing risk is result quality across representative real images.
+- The highest-value next user features are history deletion/disk controls, extra export formats, and quality preset tuning.
+
 | Category | Count |
 |----------|-------|
-| Completed | 21 |
+| Completed | 23 |
 | In Progress | 0 |
-| Pending | 16 |
+| Pending | 14 |
 
 Priority split:
 
 | Priority | Meaning | Count |
 |----------|---------|-------|
-| P0 | Required before calling the app complete for real users | 5 |
-| P1 | Strong product-readiness and quality improvements | 9 |
+| P0 | Required before calling the app complete for real users | 4 |
+| P1 | Strong product-readiness and quality improvements | 8 |
 | P2 | Useful expansion or research after the core app is stable | 2 |
+
+Recommended next functional order:
+1. Run a curated visual QA pass with real examples and record expected outputs.
+2. Add delete/clear/disk controls for local history and generated files.
+3. Add OBJ/STL export paths after GLB quality is stable.
+4. Tune presets/post-processing against the curated sample set.
 
 ---
 
@@ -33,31 +52,16 @@ _(none)_
 
 ### P0 — Product readiness blockers
 
-### [ ] [JOBS | Queue and resource control]
-**Run generation through a bounded worker queue instead of one thread per request**
-
-Checklist:
-- Add a single-worker queue by default, with a configurable worker limit
-- Return queue position and estimated state in `/api/status/{job_id}`
-- Reject new jobs with a structured `429` when the queue is full
-- Add job cancellation and timeout handling
-- Prevent duplicate clicks/submissions from creating unbounded GPU work
-- Add tests for queue limits, cancellation and timeout behavior
-
-Rationale:
-- Current generation starts a daemon thread per request
-- GPU inference should be serialized or explicitly bounded to avoid OOM, hangs and noisy failure modes
-
 ### [ ] [SETUP | First-run and offline resilience]
 **Make first launch predictable, recoverable and clear to users**
 
 Checklist:
-- Pin TripoSR source download to a known revision instead of `main`
-- Verify downloaded source/weights with checksums or expected metadata
-- Detect partial/corrupt model caches and repair them automatically
-- Add a preflight endpoint/check for Python, torch backend, GPU, VRAM, disk and network access
+- [x] Pin TripoSR source download to a known revision instead of `main`
+- [x] Verify downloaded source/weights with checksums or expected metadata
+- [x] Detect partial/corrupt model caches and repair them automatically
+- [x] Add a preflight endpoint/check for Python, torch backend, GPU, VRAM, disk and network access
 - Show first-run download/model setup progress in the UI or launcher
-- Add a documented cache warmup/offline mode for repeat installs
+- [x] Add a documented cache warmup/offline mode for repeat installs
 
 Rationale:
 - First run currently depends on GitHub and Hugging Face availability
@@ -67,9 +71,9 @@ Rationale:
 **Make the project installable and releasable without tribal knowledge**
 
 Checklist:
-- Add the missing `LICENSE` file or update README/license metadata if not MIT
-- Move runtime dependencies into `pyproject.toml` or document why `requirements.txt` is canonical
-- Make CI install from the same dependency source users install from
+- [x] Add the missing `LICENSE` file or update README/license metadata if not MIT
+- [x] Move runtime dependencies into `pyproject.toml` or document why `requirements.txt` is canonical
+- [x] Make CI install from the same dependency source users install from
 - Add release notes/changelog for user-facing versions
 - Add Docker Compose profiles for CPU and future GPU modes
 - Document supported platforms as tested/experimental/unsupported
@@ -82,10 +86,10 @@ Rationale:
 
 Checklist:
 - Show connection loss, missing job, model-load failure and download failure as distinct UI states
-- Add retry generation with the same resolved settings
-- Add reconnect/backoff behavior while polling status
-- Add a cancel button while a job is pending or running
-- Preserve the latest selected image/settings after a recoverable failure
+- [x] Add retry generation with the same resolved settings
+- [x] Add reconnect/backoff behavior while polling status
+- [x] Add a cancel button while a job is pending or running
+- [x] Preserve the latest selected image/settings after a recoverable failure
 
 Rationale:
 - Users should be able to recover from common runtime failures without refreshing or reading server logs
@@ -94,11 +98,11 @@ Rationale:
 **Default to safer local-only behavior unless the user opts into LAN exposure**
 
 Checklist:
-- Default launchers to `127.0.0.1` instead of `0.0.0.0`
-- Add an explicit launcher/config option for LAN access
-- Add restricted CORS defaults
+- [x] Default launchers to `127.0.0.1` instead of `0.0.0.0`
+- [x] Add an explicit launcher/config option for LAN access
+- [x] Add restricted CORS defaults
 - Consider an optional local access token when binding outside localhost
-- Document the security model for local and LAN use
+- [x] Document the security model for local and LAN use
 
 Rationale:
 - The app has unauthenticated upload, generation and download routes
@@ -132,19 +136,6 @@ Checklist:
 Rationale:
 - The service stores images, generated GLBs and metadata locally
 - Users should be able to inspect and remove their own generated data
-
-### [ ] [FRONTEND | Bundled viewer assets]
-**Remove runtime dependency on CDN assets**
-
-Checklist:
-- Bundle or vendor the `<model-viewer>` dependency locally
-- Add a clear fallback if the viewer script fails to load
-- Add a basic Content Security Policy suitable for the static app
-- Verify the app works offline after dependencies and models are cached
-
-Rationale:
-- The frontend currently depends on an external CDN at runtime
-- A local desktop-style tool should remain usable offline after setup
 
 ### [ ] [MODEL | Generation presets]
 **Replace raw resolution/threshold controls with safer presets**
@@ -255,6 +246,26 @@ Rationale:
 ---
 
 ## Completed
+
+### [x] [JOBS | 2026-06-30] Queue and resource control
+**Run generation through a bounded worker queue instead of one thread per request**
+
+- Adds a bounded `queue.Queue` with one worker by default
+- Adds `IMAGE3D_WORKERS`, `IMAGE3D_MAX_QUEUE_SIZE` and `IMAGE3D_JOB_TIMEOUT_SECONDS`
+- Returns queue position and queue metadata in `/api/status/{job_id}`
+- Returns structured `429` when the pending queue is full
+- Adds `POST /api/cancel/{job_id}` and a frontend cancel button
+- Suppresses duplicate active submissions with identical image bytes/settings
+- Adds tests for queue limit, duplicate suppression, cancellation and API `429`
+
+### [x] [FRONTEND | 2026-06-30] Bundled viewer assets
+**Remove runtime dependency on CDN assets**
+
+- Vendors `<model-viewer>` under `frontend/vendor/`
+- Removes Google Fonts runtime dependency
+- Adds a basic Content Security Policy for the static app
+- Shows a UI error if the local viewer script fails to load
+- Keeps the static frontend usable offline after dependencies and model cache are prepared
 
 ### [x] [UX | 2026-06-28] Preprocess preview and manual mask editing
 **Preview and edit the alpha mask before running full 3D generation**

@@ -34,9 +34,9 @@ Estrutura que representa uma requisicao de geracao 3D. Criada na submissao, atua
 | Campo | Tipo | Default | Descricao |
 |-------|------|---------|-----------|
 | `job_id` | str | UUID4 | Identificador unico do job |
-| `status` | str | "pending" | Estado: pending, running, done, error |
+| `status` | str | "pending" | Estado: pending, running, done, error, cancelled |
 | `progress` | int | 0 | Progresso estimado 0-100 |
-| `step` | str | "" | Descricao textual da etapa atual |
+| `step` | str | "Queued" | Descricao textual da etapa atual |
 | `output` | str or None | None | Nome do GLB completo gerado |
 | `full_output` | str or None | None | Alias explicito do GLB completo para download |
 | `preview_output` | str or None | None | GLB otimizado para visualizacao no browser |
@@ -48,15 +48,23 @@ Estrutura que representa uma requisicao de geracao 3D. Criada na submissao, atua
 | `created_at` | float | timestamp | Instante de criacao do job |
 | `updated_at` | float | timestamp | Ultima atualizacao do job |
 | `completed_at` | float or None | None | Instante de conclusao ou erro |
+| `queued_at` | float | timestamp | Instante em que entrou na fila |
+| `queue_position` | int or None | None | Posicao atual na fila quando pendente |
+| `started_at` | float or None | None | Instante em que um worker iniciou o job |
+| `timeout_seconds` | int or None | config | Timeout maximo do job, checado entre etapas |
+| `cancel_requested` | bool | False | Sinal de cancelamento solicitado pelo usuario |
+| `cancelled_at` | float or None | None | Instante de cancelamento final |
 
 **Transicoes de estado:**
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: submit()
-    pending --> running: thread _run() inicia
+    pending --> running: worker inicia
+    pending --> cancelled: cancel_job()
     running --> done: mesh exportado com sucesso
     running --> error: excecao capturada
+    running --> cancelled: cancelamento observado entre etapas
 ```
 
 ### ModelService
@@ -72,6 +80,10 @@ Singleton que gerencia o modelo TripoSR, deteccao de dispositivo e fila de jobs.
 | `_jobs_lock` | threading.Lock | Lock para acesso ao dicionario de jobs |
 | `_jobs` | Dict[str, Job] | Dicionario de jobs ativos |
 | `_max_jobs` | int | Limite de jobs mantidos em memoria |
+| `_queue` | queue.Queue | Fila bounded de jobs pendentes |
+| `worker_count` | int | Quantidade de workers de geracao |
+| `max_queue_size` | int | Limite de jobs pendentes antes de `429` |
+| `job_timeout_seconds` | int | Timeout por job |
 | `output_retention_days` | int | Idade maxima padrao para GLBs gerados |
 | `max_output_files` | int | Quantidade maxima padrao de GLBs retidos |
 | `device` | torch.device or None | Dispositivo de inferencia ativo |
@@ -83,10 +95,13 @@ Singleton que gerencia o modelo TripoSR, deteccao de dispositivo e fila de jobs.
 |--------|-----------|
 | `_load()` | Carrega modelo TripoSR no dispositivo detectado (lazy, thread-safe) |
 | `unload()` | Libera modelo da memoria |
-| `submit(image_bytes, params)` | Cria job e inicia thread de processamento |
+| `submit(image_bytes, params)` | Cria job, suprime duplicados ativos e enfileira para processamento |
+| `cancel_job(job_id)` | Solicita cancelamento de job pendente ou em execucao |
+| `preflight()` | Retorna diagnosticos de Python, storage, torch/GPU, cache e fila |
+| `warmup()` | Valida/download cache e carrega o modelo uma vez |
 | `prepare_preview(image_bytes, params)` | Executa somente preprocessamento para preview/edicao de mascara |
 | `get_job(job_id)` | Retorna job ou None |
-| `_run(job, image_bytes, params)` | Pipeline completo de geracao (executado em thread) |
+| `_run(job, image_bytes, params)` | Pipeline completo de geracao (executado por worker daemon) |
 | `_preprocess(image_bytes)` | Remove fundo da imagem com rembg |
 | `_write_job_metadata(job)` | Salva JSON sidecar ao lado do GLB gerado |
 | `list_history(limit)` | Lista jobs concluidos a partir dos JSON sidecars persistidos |
@@ -231,15 +246,15 @@ Implementacao substituta para `torchmcubes` usando scikit-image.
 | **Decisao** | Jobs armazenados em `Dict[str, Job]` na instancia do ModelService. Jobs sao perdidos ao reiniciar o servico. |
 | **Consequencias** | Simplicidade maxima. Sem dependencia de banco. Jobs nao persistem entre restart. |
 
-### ADR-002 — Threading em vez de fila externa
+### ADR-002 — Fila bounded em memoria em vez de fila externa
 
 | Campo | Detalhe |
 |-------|---------|
 | **Status** | Aceita |
-| **Data** | 2026-06-26 |
-| **Contexto** | Processamento unico por vez (modelo carregado under lock) |
-| **Decisao** | Usar `threading.Thread` daemon para cada job. Lock garante serializacao do modelo. |
-| **Consequencias** | Jobs concorrentes aguardam o lock. GIL do Python limita paralelismo CPU. Adequado para uso local com 1 usuario. |
+| **Data** | 2026-06-30 |
+| **Contexto** | GPU inference deve ser bounded para evitar OOM e trabalho duplicado. |
+| **Decisao** | Usar `queue.Queue` bounded com 1 worker daemon por padrao, configuravel por ambiente. |
+| **Consequencias** | Jobs pendentes recebem posicao de fila, fila cheia retorna `429`, cancelamento pendente e supressao de duplicados sao baratos. Cancelamento de job em inferencia e timeout sao observados entre etapas do pipeline. |
 
 ### ADR-003 — Paths XDG `~/.local/share/`
 

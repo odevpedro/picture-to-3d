@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 
 [project.scripts]
 serve = "api.main:serve"
+image3d-warmup = "api.main:warmup"
 
 [dependency-groups]
 dev = [

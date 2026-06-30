@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from api.routers import generate as generate_router
+from api.services.model_service import JobQueueFull
 
 
 class FakeModelService:
@@ -18,8 +19,13 @@ class FakeModelService:
         self.preview_calls = []
         self.history_calls = []
         self.cleanup_calls = []
+        self.cancel_calls = []
+        self.preflight_calls = 0
+        self.raise_queue_full = False
 
     def submit(self, image_bytes, params):
+        if self.raise_queue_full:
+            raise JobQueueFull(1)
         self.submitted.append((image_bytes, params))
         return "job-123"
 
@@ -37,6 +43,14 @@ class FakeModelService:
     def cleanup_outputs(self, **kwargs):
         self.cleanup_calls.append(kwargs)
         return {"removed_count": 0, "error_count": 0, "dry_run": kwargs["dry_run"]}
+
+    def cancel_job(self, job_id):
+        self.cancel_calls.append(job_id)
+        return self.jobs.get(job_id)
+
+    def preflight(self):
+        self.preflight_calls += 1
+        return {"setup": {"network_required": False}}
 
     def unload(self):
         pass
@@ -112,6 +126,16 @@ def test_generate_accepts_valid_image_and_resolves_preset(fake_model_service):
     assert params["mc_threshold"] == 28.0
     assert params["input"]["width"] == 128
     assert params["input"]["height"] == 128
+
+
+def test_generate_returns_429_when_generation_queue_is_full(fake_model_service):
+    fake_model_service.raise_queue_full = True
+
+    with pytest.raises(HTTPException) as exc_info:
+        call_generate(make_upload("input.png", make_image_bytes(), "image/png"))
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail["code"] == "generation_queue_full"
 
 
 def test_generate_clamps_advanced_overrides(fake_model_service):
@@ -291,6 +315,12 @@ def test_status_returns_job_metadata(fake_model_service):
         created_at=1.0,
         updated_at=2.0,
         completed_at=2.0,
+        queued_at=0.5,
+        started_at=1.1,
+        queue_position=None,
+        cancel_requested=False,
+        cancelled_at=None,
+        timeout_seconds=1800,
         settings={"preset": "fast"},
     )
 
@@ -303,12 +333,54 @@ def test_status_returns_job_metadata(fake_model_service):
     assert body["diagnostics"]["mesh"]["faces"] == 10
     assert body["stage_timings"]["export"]["duration_seconds"] == 0.1
     assert body["created_at"] == 1.0
+    assert body["queued_at"] == 0.5
+    assert body["queue_position"] is None
+    assert body["queue"]["worker_count"] is None
     assert body["settings"]["preset"] == "fast"
 
 
 def test_status_returns_404_for_missing_job(fake_model_service):
     with pytest.raises(HTTPException) as exc_info:
         anyio.run(generate_router.status, "missing")
+
+    assert exc_info.value.status_code == 404
+
+
+def test_cancel_endpoint_marks_existing_job(fake_model_service):
+    fake_model_service.jobs["job-1"] = SimpleNamespace(
+        job_id="job-1",
+        status="cancelled",
+        progress=0,
+        step="Cancelled",
+        output=None,
+        full_output=None,
+        preview_output=None,
+        preview=None,
+        error=None,
+        diagnostics={},
+        stage_timings={},
+        created_at=1.0,
+        updated_at=2.0,
+        completed_at=2.0,
+        queued_at=1.0,
+        started_at=None,
+        queue_position=None,
+        cancel_requested=True,
+        cancelled_at=2.0,
+        timeout_seconds=1800,
+        settings={"preset": "fast"},
+    )
+
+    body = anyio.run(generate_router.cancel, "job-1")
+
+    assert body["status"] == "cancelled"
+    assert body["cancel_requested"] is True
+    assert fake_model_service.cancel_calls == ["job-1"]
+
+
+def test_cancel_returns_404_for_missing_job(fake_model_service):
+    with pytest.raises(HTTPException) as exc_info:
+        anyio.run(generate_router.cancel, "missing")
 
     assert exc_info.value.status_code == 404
 
@@ -372,3 +444,10 @@ def test_history_endpoint_forwards_limit(fake_model_service):
 
     assert body == {"count": 0, "items": []}
     assert fake_model_service.history_calls == [{"limit": 7}]
+
+
+def test_preflight_endpoint_forwards_service_result(fake_model_service):
+    body = anyio.run(generate_router.preflight)
+
+    assert body == {"setup": {"network_required": False}}
+    assert fake_model_service.preflight_calls == 1

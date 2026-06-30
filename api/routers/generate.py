@@ -6,7 +6,12 @@ from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 
-from api.services.model_service import model_service, OUTPUTS_DIR, PREVIEWS_DIR
+from api.services.model_service import (
+    JobQueueFull,
+    model_service,
+    OUTPUTS_DIR,
+    PREVIEWS_DIR,
+)
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -95,7 +100,17 @@ async def generate(
         mc_threshold,
     )
     params["input"] = image_info
-    job_id = model_service.submit(image_bytes, params)
+    try:
+        job_id = model_service.submit(image_bytes, params)
+    except JobQueueFull as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "generation_queue_full",
+                "message": "Generation queue is full. Try again after a current job finishes.",
+                "meta": {"max_queue_size": exc.max_queue_size},
+            },
+        ) from exc
     return {"job_id": job_id, "params": params}
 
 
@@ -138,6 +153,18 @@ async def status(job_id: str):
     job = model_service.get_job(job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id} not found")
+    return _job_response(job)
+
+
+@router.post("/cancel/{job_id}")
+async def cancel(job_id: str):
+    job = model_service.cancel_job(job_id)
+    if not job:
+        raise HTTPException(404, f"Job {job_id} not found")
+    return _job_response(job)
+
+
+def _job_response(job):
     return {
         "job_id":   job.job_id,
         "status":   job.status,
@@ -153,6 +180,17 @@ async def status(job_id: str):
         "created_at": getattr(job, "created_at", None),
         "updated_at": getattr(job, "updated_at", None),
         "completed_at": getattr(job, "completed_at", None),
+        "queued_at": getattr(job, "queued_at", None),
+        "started_at": getattr(job, "started_at", None),
+        "queue_position": getattr(job, "queue_position", None),
+        "cancel_requested": getattr(job, "cancel_requested", False),
+        "cancelled_at": getattr(job, "cancelled_at", None),
+        "timeout_seconds": getattr(job, "timeout_seconds", None),
+        "queue": {
+            "position": getattr(job, "queue_position", None),
+            "worker_count": getattr(model_service, "worker_count", None),
+            "max_queue_size": getattr(model_service, "max_queue_size", None),
+        },
         "settings": getattr(job, "settings", None),
     }
 
@@ -184,6 +222,11 @@ async def preview(filename: str):
 @router.get("/device")
 async def device_info():
     return {"device": model_service.device_name}
+
+
+@router.get("/preflight")
+async def preflight():
+    return model_service.preflight()
 
 
 @router.get("/history")

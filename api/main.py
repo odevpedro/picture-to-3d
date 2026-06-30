@@ -3,6 +3,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 from contextlib import asynccontextmanager
+import json
+import os
 
 from api.routers import generate
 from api.services.model_service import model_service
@@ -44,4 +46,27 @@ async def health():
 def serve():
     import uvicorn
 
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8080, reload=True)
+    host = os.environ.get("IMAGE3D_HOST", "127.0.0.1")
+    port = int(os.environ.get("IMAGE3D_PORT", "8080"))
+    uvicorn.run("api.main:app", host=host, port=port, reload=True)
+
+
+def warmup():
+    result = model_service.warmup()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Image to 3D server utilities")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="download/validate TripoSR cache and load the model once",
+    )
+    args = parser.parse_args()
+    if args.warmup:
+        warmup()
+    else:
+        serve()

@@ -104,7 +104,7 @@ uv pip install "torchvision==0.27.1+rocm7.1" --index-url https://download.pytorc
 uv pip install -r requirements.txt
 
 # Start the server
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8080 --reload
+uv run --no-sync uvicorn api.main:app --host 127.0.0.1 --port 8080 --reload
 ```
 
 ### Windows Setup (DirectML)
@@ -112,7 +112,7 @@ uv run uvicorn api.main:app --host 0.0.0.0 --port 8080 --reload
 ```batch
 :: Prerequisites: Python 3.11+, DirectML-enabled PyTorch (install manually)
 python -m pip install -r requirements.txt
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8080 --reload
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8080 --reload
 ```
 
 ### Docker Setup (CPU development)
@@ -126,11 +126,19 @@ The Docker image is CPU-oriented for reproducible local runs. Use the native Lin
 
 ### First Run Behavior
 
-On first startup, the server will:
+On first generation or explicit warmup, the server will:
 1. Download TripoSR source code from GitHub (~archive)
 2. Download TripoSR pretrained weights from Hugging Face (~1.5 GB)
 3. Patch the isosurface module to use scikit-image marching cubes
 4. Cache everything in `~/.local/share/image3d/` for subsequent runs
+
+TripoSR source is pinned to a known commit by default. To prepare cache before normal use:
+
+```bash
+uv run --no-sync python -m api.main --warmup
+```
+
+Set `IMAGE3D_OFFLINE=1` after warmup to force cached-only startup/generation.
 
 ---
 
@@ -143,9 +151,11 @@ On first startup, the server will:
 | POST | `/api/preprocess` | Generate the model-input PNG preview and editable alpha mask |
 | POST | `/api/generate` | Submit image for 3D generation |
 | GET | `/api/status/{job_id}` | Poll generation progress |
+| POST | `/api/cancel/{job_id}` | Request cancellation for a queued or running job |
 | GET | `/api/download/{filename}` | Download generated GLB |
 | GET | `/api/preview/{filename}` | Download sanitized PNG preview |
 | GET | `/api/device` | Current device info |
+| GET | `/api/preflight` | Environment, cache, storage, torch/GPU and queue readiness |
 | GET | `/api/history` | List persisted completed jobs from metadata sidecars |
 | POST | `/api/cleanup` | Clean old outputs/previews/metadata |
 
@@ -215,6 +225,8 @@ Status values: `pending` -> `running` -> `done` / `error`
 
 `preview_output` is the smaller GLB used by the browser viewer. `full_output`/`output` is the full-quality GLB used by the download button.
 
+Queued jobs include `queue_position`, `queued_at` and queue metadata. The default worker count is one, so GPU-heavy generation is serialized unless `IMAGE3D_WORKERS` is raised deliberately.
+
 ### GET /api/history
 
 Reads persisted job metadata from `outputs/*.json` and returns recent completed jobs, including `preview_output`, `full_output`, settings, diagnostics and stage timings.
@@ -276,6 +288,22 @@ hallucinated back-side volume is acceptable.
 | `IMAGE3D_DATA_DIR` | `~/.local/share/image3d` | Overrides model/output/preview storage root |
 | `IMAGE3D_OUTPUT_RETENTION_DAYS` | `14` | Maximum age for generated outputs before cleanup |
 | `IMAGE3D_MAX_OUTPUT_FILES` | `100` | Maximum number of generated GLBs retained |
+| `IMAGE3D_HOST` | `127.0.0.1` | Server bind host for `serve()` and launchers |
+| `IMAGE3D_PORT` | `8080` | Server port for `serve()` and launchers |
+| `IMAGE3D_LAN` | `0` | Set to `1` to bind launchers to `0.0.0.0` |
+| `IMAGE3D_WORKERS` | `1` | Number of generation workers |
+| `IMAGE3D_MAX_QUEUE_SIZE` | `4` | Maximum queued generation jobs before `429` |
+| `IMAGE3D_JOB_TIMEOUT_SECONDS` | `1800` | Per-job timeout checked between pipeline stages |
+| `IMAGE3D_OFFLINE` | `0` | Set to `1` to reject missing/corrupt model cache instead of downloading |
+| `TRIPOSR_SOURCE_REF` | pinned commit | Override the pinned TripoSR source revision |
+
+### Dependency Source
+
+`requirements.txt` is the canonical runtime dependency source. PyTorch is intentionally installed separately by the launchers because ROCm/CUDA/CPU wheels come from different indexes and a generic `pyproject.toml` dependency can replace the ROCm build with a CPU/CUDA wheel. Use `uv run --no-sync ...` after launcher setup so uv does not resync torch.
+
+### Network Exposure
+
+Launchers and `api.main:serve` bind to `127.0.0.1` by default. Set `IMAGE3D_LAN=1` or `IMAGE3D_HOST=0.0.0.0` only when you intentionally want access from another device on the network. The API has unauthenticated upload, generation and download routes, and CORS is not enabled by default.
 
 ---
 
@@ -283,7 +311,8 @@ hallucinated back-side volume is acceptable.
 
 ```bash
 # Automated API tests, no GPU required
-pytest -q
+uv pip install pytest
+uv run --no-sync pytest -q
 
 # Manual testing via curl:
 curl -X POST http://localhost:8080/api/generate \
@@ -313,6 +342,10 @@ curl -X POST http://localhost:8080/api/generate \
 - [x] Preview/full GLB output variants
 - [x] Stage timings in job diagnostics
 - [x] Docker image
+- [x] Bounded generation queue with duplicate suppression, cancellation and timeout state
+- [x] Local-only launcher default with opt-in LAN exposure
+- [x] Pinned TripoSR source cache, preflight endpoint and offline mode
+- [x] Bundled `<model-viewer>` asset for offline frontend use
 
 ---
 

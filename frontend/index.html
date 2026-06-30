@@ -3,9 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; model-src 'self' blob:; font-src 'self' data:;" />
   <title>Image to 3D</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet" />
   <style>
     :root {
       --bg:        #0a0a0b;
@@ -19,8 +18,8 @@
       --muted:     #6b6b82;
       --ok:        #4ade80;
       --err:       #f87171;
-      --mono:      'Share Tech Mono', monospace;
-      --sans:      'Barlow', sans-serif;
+      --mono:      'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+      --sans:      Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -374,7 +373,14 @@
     }
 
     /* ── Generate Button ── */
-    #generate-btn {
+    .job-actions {
+      display: grid;
+      gap: 0.6rem;
+    }
+
+    #generate-btn,
+    #cancel-btn,
+    #retry-btn {
       width: 100%;
       padding: 0.85rem;
       background: var(--accent);
@@ -389,8 +395,29 @@
       margin-top: 0.25rem;
     }
 
+    #cancel-btn {
+      display: none;
+      background: transparent;
+      border: 1px solid var(--err);
+      color: var(--err);
+    }
+
+    #retry-btn {
+      display: none;
+      background: transparent;
+      border: 1px solid var(--border-hi);
+      color: var(--text);
+    }
+
+    #cancel-btn.visible,
+    #retry-btn.visible { display: block; }
+
     #generate-btn:hover:not(:disabled) { background: var(--accent-hi); }
-    #generate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #cancel-btn:hover:not(:disabled) { border-color: #fecaca; color: #fecaca; }
+    #retry-btn:hover:not(:disabled) { border-color: var(--accent-hi); color: var(--accent-hi); }
+    #generate-btn:disabled,
+    #cancel-btn:disabled,
+    #retry-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* ── Progress ── */
     #progress-wrap {
@@ -733,7 +760,11 @@
     </div>
 
     <div class="section">
-      <button id="generate-btn" disabled>GENERATE 3D MODEL</button>
+      <div class="job-actions">
+        <button id="generate-btn" disabled>GENERATE 3D MODEL</button>
+        <button id="cancel-btn">CANCEL JOB</button>
+        <button id="retry-btn">RETRY LAST JOB</button>
+      </div>
     </div>
 
     <div class="section">
@@ -791,13 +822,18 @@
 </main>
 
 <!-- model-viewer web component -->
-<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+<script type="module" src="/static/vendor/model-viewer.min.js"></script>
 
 <script>
+  let viewerLoadWarningShown = false;
+
   // ── State ──
   let selectedFile = null;
   let currentJobId = null;
   let pollInterval = null;
+  let pollingActive = false;
+  let pollDelay = 800;
+  let pollFailures = 0;
   let currentFilename = null;
   let currentDisplayFilename = null;
   let currentDownloadFilename = null;
@@ -822,6 +858,7 @@
   let paintingMask = false;
   let previewRequestSeq = 0;
   let preparePreviewTimer = null;
+  let lastGenerationSnapshot = null;
 
   const PRESETS = {
     fast:     { label: 'Fast',     resolution: 128, threshold: 28 },
@@ -851,6 +888,8 @@
   const presetLabel  = document.getElementById('preset-label');
   const presetMeta   = document.getElementById('preset-meta');
   const generateBtn  = document.getElementById('generate-btn');
+  const cancelBtn    = document.getElementById('cancel-btn');
+  const retryBtn     = document.getElementById('retry-btn');
   const progressWrap = document.getElementById('progress-wrap');
   const progressBar  = document.getElementById('progress-bar-inner');
   const progressStep = document.getElementById('progress-step');
@@ -874,6 +913,16 @@
   const depthSlider = document.getElementById('depth-slider');
   const alphaSlider = document.getElementById('alpha-slider');
   const maskBiasSlider = document.getElementById('mask-bias-slider');
+
+  function verifyViewerLoaded() {
+    if (customElements.get('model-viewer') || viewerLoadWarningShown) return;
+    viewerLoadWarningShown = true;
+    showError('3D viewer failed to load. Check that /static/vendor/model-viewer.min.js is available.');
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(verifyViewerLoaded, 1500);
+  });
 
   // ── Device info ──
   fetch('/api/device')
@@ -1147,11 +1196,13 @@
     currentFilename = null;
     currentDisplayFilename = null;
     currentDownloadFilename = null;
+    lastGenerationSnapshot = null;
     compareVisible = false;
     showCompare(false);
     downloadBtn.classList.remove('visible');
     resetCameraBtn.classList.remove('visible');
     inspectBtn.classList.remove('visible');
+    retryBtn.classList.remove('visible');
     generateBtn.disabled = false;
     clearError();
     scheduleMaskPreview(250);
@@ -1212,76 +1263,156 @@
   }
 
   // ── Generate ──
-  generateBtn.addEventListener('click', async () => {
+  generateBtn.addEventListener('click', () => {
     if (!selectedFile) return;
+    const snapshot = captureGenerationSnapshot();
+    lastGenerationSnapshot = snapshot;
+    submitGeneration(snapshot);
+  });
 
-    clearError();
-    setGenerating(true);
+  retryBtn.addEventListener('click', () => {
+    if (!lastGenerationSnapshot) return;
+    submitGeneration(lastGenerationSnapshot);
+  });
 
+  cancelBtn.addEventListener('click', async () => {
+    if (!currentJobId) return;
+    cancelBtn.disabled = true;
+    try {
+      const res = await fetch(`/api/cancel/${currentJobId}`, { method: 'POST' });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res));
+      }
+      const data = await res.json();
+      handleJobStatus(data);
+      if (data.status !== 'cancelled') {
+        statusInfo.textContent = 'Cancellation requested';
+      }
+    } catch (err) {
+      showError(err.message);
+      cancelBtn.disabled = false;
+    }
+  });
+
+  function captureGenerationSnapshot() {
+    return {
+      image: selectedFile,
+      preset,
+      mode: generationMode,
+      input_source: inputSource,
+      object_type: objectType,
+      foreground_ratio: foregroundRatio,
+      extrude_depth: extrudeDepth,
+      alpha_threshold: alphaThreshold,
+      mask_bias: maskBias,
+      mask_edits: JSON.stringify(maskEdits),
+      advanced: advancedMode,
+      resolution,
+      mc_threshold: threshSlider.value,
+    };
+  }
+
+  function buildGenerationForm(snapshot) {
     const form = new FormData();
-    form.append('image', selectedFile);
-    form.append('preset', preset);
-    form.append('mode', generationMode);
-    form.append('input_source', inputSource);
-    form.append('object_type', objectType);
-    form.append('foreground_ratio', foregroundRatio);
-    form.append('extrude_depth', extrudeDepth);
-    form.append('alpha_threshold', alphaThreshold);
-    form.append('mask_bias', maskBias);
-    form.append('mask_edits', JSON.stringify(maskEdits));
-    form.append('advanced', advancedMode);
-    form.append('resolution', resolution);
-    form.append('mc_threshold', threshSlider.value);
+    Object.entries(snapshot).forEach(([key, value]) => {
+      form.append(key, value);
+    });
+    return form;
+  }
+
+  async function submitGeneration(snapshot) {
+    clearError();
+    currentJobId = null;
+    setGenerating(true);
+    cancelBtn.disabled = true;
 
     try {
+      const form = buildGenerationForm(snapshot);
       const res = await fetch('/api/generate', { method: 'POST', body: form });
       if (!res.ok) {
         throw new Error(await apiErrorMessage(res));
       }
       const data = await res.json();
       currentJobId = data.job_id;
+      cancelBtn.disabled = false;
       startPolling();
     } catch (err) {
       showError(err.message);
       setGenerating(false);
     }
-  });
+  }
 
   function startPolling() {
-    if (pollInterval) clearInterval(pollInterval);
-    pollInterval = setInterval(pollStatus, 800);
+    stopPolling();
+    pollingActive = true;
+    pollDelay = 800;
+    pollFailures = 0;
+    schedulePoll(0);
+  }
+
+  function stopPolling() {
+    pollingActive = false;
+    if (pollInterval) clearTimeout(pollInterval);
+    pollInterval = null;
+  }
+
+  function schedulePoll(delay = pollDelay) {
+    if (!pollingActive) return;
+    if (pollInterval) clearTimeout(pollInterval);
+    pollInterval = setTimeout(pollStatus, delay);
   }
 
   async function pollStatus() {
-    if (!currentJobId) return;
+    if (!currentJobId || !pollingActive) return;
     try {
       const res  = await fetch(`/api/status/${currentJobId}`);
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res));
+      }
       const data = await res.json();
-
-      updateProgress(data.progress, data.step);
-      statusInfo.textContent = `${data.progress}% — ${data.step || data.status}`;
-
-      if (data.preview && data.preview !== currentPreview) {
-        showSanitizedPreview(data.preview, data.diagnostics?.preprocess);
-      }
-
-      if (data.status === 'done') {
-        clearInterval(pollInterval);
-        setGenerating(false);
-        currentFilename = data.output;
-        currentDownloadFilename = data.full_output || data.output;
-        currentDisplayFilename = data.preview_output || data.output;
-        showModel(`/api/download/${currentDisplayFilename}`);
-        rememberResult(data);
-        loadHistory();
-        statusInfo.textContent = doneStatusText(data);
-      } else if (data.status === 'error') {
-        clearInterval(pollInterval);
-        setGenerating(false);
-        showError(data.error || 'Generation failed');
-      }
+      pollFailures = 0;
+      pollDelay = 800;
+      handleJobStatus(data);
+      if (pollingActive) schedulePoll();
     } catch (e) {
+      pollFailures += 1;
+      pollDelay = Math.min(5000, 800 * (2 ** Math.min(pollFailures, 3)));
+      statusInfo.textContent = `Connection lost — retrying in ${Math.round(pollDelay / 1000)}s`;
       console.error(e);
+      schedulePoll(pollDelay);
+    }
+  }
+
+  function handleJobStatus(data) {
+    updateProgress(data.progress || 0, data.step);
+    if (data.status === 'pending' && data.queue_position) {
+      statusInfo.textContent = `Queued #${data.queue_position} — waiting for GPU`;
+    } else {
+      statusInfo.textContent = `${data.progress || 0}% — ${data.step || data.status}`;
+    }
+
+    if (data.preview && data.preview !== currentPreview) {
+      showSanitizedPreview(data.preview, data.diagnostics?.preprocess);
+    }
+
+    if (data.status === 'done') {
+      stopPolling();
+      setGenerating(false);
+      currentFilename = data.output;
+      currentDownloadFilename = data.full_output || data.output;
+      currentDisplayFilename = data.preview_output || data.output;
+      showModel(`/api/download/${currentDisplayFilename}`);
+      rememberResult(data);
+      loadHistory();
+      statusInfo.textContent = doneStatusText(data);
+    } else if (data.status === 'error') {
+      stopPolling();
+      setGenerating(false);
+      showError(data.error || 'Generation failed');
+    } else if (data.status === 'cancelled') {
+      stopPolling();
+      setGenerating(false);
+      statusInfo.textContent = 'Cancelled';
     }
   }
 
@@ -1291,8 +1422,12 @@
   }
 
   function setGenerating(active) {
-    generateBtn.disabled = active;
+    generateBtn.disabled = active || !selectedFile;
     generateBtn.textContent = active ? 'GENERATING...' : 'GENERATE 3D MODEL';
+    cancelBtn.classList.toggle('visible', active);
+    cancelBtn.disabled = !active;
+    retryBtn.classList.toggle('visible', Boolean(lastGenerationSnapshot) && !active);
+    retryBtn.disabled = active || !lastGenerationSnapshot;
     progressWrap.classList.toggle('visible', active);
     if (!active) updateProgress(0, '');
   }

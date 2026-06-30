@@ -46,7 +46,7 @@ sequenceDiagram
         API-->>Client: { status, progress, step }
     end
 
-    Note over ModelSvc,GPU: Execucao em thread separada
+    Note over ModelSvc,GPU: Execucao em worker daemon bounded
 
     ModelSvc->>ModelSvc: _load() — carrega modelo (uma vez)
     ModelSvc->>ModelSvc: _preprocess() — rembg remove fundo
@@ -72,7 +72,7 @@ flowchart LR
         DWN[Download /api/download]
     end
 
-    subgraph SERVICE["ModelService (thread)"]
+    subgraph SERVICE["ModelService (bounded worker queue)"]
         BG[rembg\nremove fundo]
         TSR[TripoSR\nscene codes]
         MC[Marching Cubes\nmesh extraction]
@@ -105,7 +105,7 @@ flowchart LR
 
 - **Erros de dominio** sao retornados como HTTPException com codigo adequado
 - **Erros de infra** sao capturados no job e expostos no campo `error`
-- **Jobs** sao executados em `threading.Thread` daemon
+- **Jobs** sao enfileirados em `queue.Queue` bounded e executados por worker daemon
 - **Modelo** e carregado sob lock e uma unica vez (lazy loading)
 - **Caminhos de arquivo** seguem XDG: `~/.local/share/image3d/`
 
@@ -153,8 +153,8 @@ O servico carrega o modelo TripoSR (VAST-AI-Research) em uma GPU ROCm ou CUDA, r
 - **Arquivo:** `api/services/model_service.py:268-303`
 
 1. Cliente faz upload da imagem (`POST /api/generate`)
-2. Servico cria job com UUID e retorna `job_id`
-3. Thread separada executa o pipeline:
+2. Servico cria job com UUID, registra posicao na fila e retorna `job_id`
+3. Worker daemon consome o job e executa o pipeline:
    1. `_load()` — carrega TripoSR no dispositivo detectado (uma vez)
    2. `_preprocess()` — remove fundo com rembg
    3. `model(image)` — gera scene codes no dispositivo
@@ -231,11 +231,11 @@ sequenceDiagram
     Router->>MS: submit(image_bytes, params)
 
     MS->>MS: cria Job(job_id)
-    MS->>MS: inicia thread _run()
+    MS->>MS: enfileira job em queue.Queue bounded
     MS-->>Router: job_id
     Router-->>Client: { job_id }
 
-    Note over MS,GPU: --- thread _run() ---
+    Note over MS,GPU: --- worker _run() ---
 
     MS->>MS: _load() — sob lock
     MS->>MS: detecta device (ROCm/CUDA/CPU)
@@ -384,11 +384,11 @@ Se `model.to(device)` falha (e.g., VRAM insuficiente), o servico tenta CPU como 
 
 ## Resumo
 
-Jobs de geracao sao executados em threads separadas com progresso reportado via polling.
+Jobs de geracao sao enfileirados em uma fila bounded e executados por workers daemon com progresso reportado via polling.
 
 **Motivacao:** Geracao 3D leva dezenas de segundos — nao pode bloquear a API.
 
-**Resultado:** Cliente recebe `job_id` imediatamente e polla o progresso.
+**Resultado:** Cliente recebe `job_id` imediatamente, acompanha posicao de fila/progresso e pode cancelar.
 
 ---
 
@@ -396,14 +396,14 @@ Jobs de geracao sao executados em threads separadas com progresso reportado via 
 
 ### 1. Submissao
 
-- **Arquivo:** `api/services/model_service.py:261-266`
+- **Arquivo:** `api/services/model_service.py`
 
 ```python
 def submit(self, image_bytes: bytes, params: dict) -> str:
     job_id = str(uuid.uuid4())
-    job = Job(job_id)
+    job = Job(job_id, settings=params)
     self._jobs[job_id] = job
-    threading.Thread(target=self._run, args=(job, image_bytes, params), daemon=True).start()
+    self._queue.put_nowait((job_id, image_bytes, params))
     return job_id
 ```
 
@@ -411,22 +411,26 @@ def submit(self, image_bytes: bytes, params: dict) -> str:
 
 | Campo | Descricao |
 |-------|-----------|
-| `status` | pending -> running -> done / error |
+| `status` | pending -> running -> done / error / cancelled |
 | `progress` | 0-100 (estimado) |
 | `step` | Descricao textual da etapa atual |
+| `queue_position` | Posicao na fila enquanto pendente |
 | `output` | Nome do arquivo GLB gerado |
-| `error` | Traceback em caso de erro |
+| `error` | Mensagem segura em caso de erro |
 
 ### 3. Estados
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: Job criado
-    pending --> running: Thread inicia
+    pending --> running: Worker inicia
+    pending --> cancelled: Cancelado antes de executar
     running --> done: Export GLB concluido
     running --> error: Excecao capturada
+    running --> cancelled: Cancelamento observado
     done --> [*]
     error --> [*]
+    cancelled --> [*]
 ```
 
 ---

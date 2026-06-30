@@ -5,10 +5,14 @@ Falls back to CPU if no GPU is available.
 import io
 import json
 import os
+import queue
 import time
 import uuid
 import threading
 import ctypes
+import hashlib
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -62,6 +66,15 @@ OUTPUTS_DIR = _BASE / "outputs"
 PREVIEWS_DIR = _BASE / "previews"
 DEFAULT_OUTPUT_RETENTION_DAYS = 14
 DEFAULT_MAX_OUTPUT_FILES = 100
+DEFAULT_WORKER_COUNT = 1
+DEFAULT_MAX_QUEUE_SIZE = 4
+DEFAULT_JOB_TIMEOUT_SECONDS = 30 * 60
+DEFAULT_TRIPOSR_SOURCE_REF = "107cefdc244c39106fa830359024f6a2f1c78871"
+TRIPOSR_REQUIRED_FILES = (
+    "tsr/system.py",
+    "tsr/models/isosurface.py",
+)
+MIN_MODEL_CKPT_BYTES = 100 * 1024 * 1024
 
 
 def _ensure_storage_dirs():
@@ -84,6 +97,31 @@ def _env_positive_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _offline_mode() -> bool:
+    return _env_flag("IMAGE3D_OFFLINE")
+
+
+class JobQueueFull(Exception):
+    def __init__(self, max_queue_size: int):
+        self.max_queue_size = max_queue_size
+        super().__init__(f"Generation queue is full ({max_queue_size})")
+
+
+class JobCancelled(Exception):
+    pass
+
+
+class JobTimeout(Exception):
+    pass
 
 
 # ------------------------------------------------------------------ #
@@ -143,6 +181,29 @@ def _patch_isosurface(src_dir: Path):
     print("[ModelService] isosurface.py patched (scikit-image backend).")
 
 
+def _triposr_ref() -> str:
+    return os.environ.get("TRIPOSR_SOURCE_REF", DEFAULT_TRIPOSR_SOURCE_REF).strip()
+
+
+def _triposr_source_url(source_ref: str) -> str:
+    return f"https://github.com/VAST-AI-Research/TripoSR/archive/{source_ref}.zip"
+
+
+def _source_ref_marker(src_dir: Path) -> Path:
+    return src_dir / ".source_ref"
+
+
+def _source_ref_matches(src_dir: Path, source_ref: str) -> bool:
+    try:
+        return _source_ref_marker(src_dir).read_text(encoding="utf-8").strip() == source_ref
+    except OSError:
+        return False
+
+
+def _triposr_source_valid(src_dir: Path) -> bool:
+    return all((src_dir / relative).is_file() for relative in TRIPOSR_REQUIRED_FILES)
+
+
 # ------------------------------------------------------------------ #
 # TripoSR source downloader
 # ------------------------------------------------------------------ #
@@ -150,37 +211,64 @@ def _patch_isosurface(src_dir: Path):
 def _ensure_triposr(models_dir: Path) -> Path:
     import urllib.request, zipfile
 
+    source_ref = _triposr_ref()
     src_dir = models_dir / "_triposr_src"
-    needs_patch = True
 
-    if (src_dir / "tsr").exists():
-        # Check if already patched
+    if _triposr_source_valid(src_dir) and _source_ref_matches(src_dir, source_ref):
         iso = src_dir / "tsr" / "models" / "isosurface.py"
         if iso.exists() and "skimage" in iso.read_text(encoding="utf-8"):
-            needs_patch = False
-        if not needs_patch:
             return src_dir
+        _patch_isosurface(src_dir)
+        return src_dir
 
-    if not (src_dir / "tsr").exists():
-        src_dir.mkdir(parents=True, exist_ok=True)
-        print("[ModelService] Downloading TripoSR source...")
-        url = "https://github.com/VAST-AI-Research/TripoSR/archive/refs/heads/main.zip"
+    if _offline_mode():
+        raise RuntimeError(
+            "TripoSR source cache is missing or invalid and IMAGE3D_OFFLINE is enabled."
+        )
+
+    tmp_dir = models_dir / f"_triposr_src.tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[ModelService] Downloading TripoSR source at {source_ref}...")
+        url = _triposr_source_url(source_ref)
         with urllib.request.urlopen(url, timeout=180) as resp:
             data = resp.read()
         print("[ModelService] Extracting TripoSR source...")
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for member in zf.namelist():
-                if not member.startswith("TripoSR-main/tsr/"):
+                parts = member.split("/", 1)
+                if len(parts) != 2:
                     continue
-                rel    = member[len("TripoSR-main/"):]
-                target = src_dir / rel
+                rel = parts[1]
+                if not rel.startswith("tsr/"):
+                    continue
+                target = tmp_dir / rel
                 if member.endswith("/"):
                     target.mkdir(parents=True, exist_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(zf.read(member))
 
-    _patch_isosurface(src_dir)
+        if not _triposr_source_valid(tmp_dir):
+            missing = [
+                relative
+                for relative in TRIPOSR_REQUIRED_FILES
+                if not (tmp_dir / relative).is_file()
+            ]
+            raise RuntimeError(f"Downloaded TripoSR source is incomplete: {missing}")
+
+        _source_ref_marker(tmp_dir).write_text(source_ref, encoding="utf-8")
+        _patch_isosurface(tmp_dir)
+        if src_dir.exists():
+            shutil.rmtree(src_dir)
+        tmp_dir.replace(src_dir)
+    except Exception:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
     print("[ModelService] TripoSR source ready.")
     return src_dir
 
@@ -191,16 +279,41 @@ def _ensure_triposr(models_dir: Path) -> Path:
 
 def _ensure_weights(models_dir: Path) -> Path:
     weights_dir = models_dir / "triposr"
-    if (weights_dir / "model.ckpt").exists() and (weights_dir / "config.yaml").exists():
+    if _weights_cache_valid(weights_dir):
         return weights_dir
+
+    if _offline_mode():
+        raise RuntimeError(
+            "TripoSR weights cache is missing or invalid and IMAGE3D_OFFLINE is enabled."
+        )
 
     from huggingface_hub import hf_hub_download
     weights_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("model.ckpt", "config.yaml"):
+        path = weights_dir / filename
+        if path.exists():
+            path.unlink()
     print("[ModelService] Downloading TripoSR weights (~1.5 GB)...")
     hf_hub_download(repo_id="stabilityai/TripoSR", filename="model.ckpt",  local_dir=str(weights_dir))
     hf_hub_download(repo_id="stabilityai/TripoSR", filename="config.yaml", local_dir=str(weights_dir))
+    if not _weights_cache_valid(weights_dir):
+        raise RuntimeError("Downloaded TripoSR weights are incomplete.")
     print("[ModelService] Weights downloaded.")
     return weights_dir
+
+
+def _weights_cache_valid(weights_dir: Path) -> bool:
+    ckpt = weights_dir / "model.ckpt"
+    config = weights_dir / "config.yaml"
+    try:
+        return (
+            ckpt.is_file()
+            and ckpt.stat().st_size >= MIN_MODEL_CKPT_BYTES
+            and config.is_file()
+            and config.stat().st_size > 0
+        )
+    except OSError:
+        return False
 
 
 # ------------------------------------------------------------------ #
@@ -208,12 +321,19 @@ def _ensure_weights(models_dir: Path) -> Path:
 # ------------------------------------------------------------------ #
 
 class Job:
-    def __init__(self, job_id: str, settings: dict | None = None):
+    def __init__(
+        self,
+        job_id: str,
+        settings: dict | None = None,
+        *,
+        timeout_seconds: int | None = None,
+        submission_key: str | None = None,
+    ):
         now = time.time()
         self.job_id   = job_id
         self.status   = "pending"
         self.progress = 0
-        self.step     = ""
+        self.step     = "Queued"
         self.output   = None
         self.full_output = None
         self.preview_output = None
@@ -225,6 +345,14 @@ class Job:
         self.created_at = now
         self.updated_at = now
         self.completed_at = None
+        self.queued_at = now
+        self.queue_position = None
+        self.started_at = None
+        self.started_monotonic = None
+        self.timeout_seconds = timeout_seconds
+        self.cancel_requested = False
+        self.cancelled_at = None
+        self.submission_key = submission_key
 
     def touch(self):
         self.updated_at = time.time()
@@ -235,12 +363,36 @@ class Job:
 # ------------------------------------------------------------------ #
 
 class ModelService:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        worker_count: int | None = None,
+        max_queue_size: int | None = None,
+        job_timeout_seconds: int | None = None,
+        start_workers: bool = True,
+    ):
         self._model      = None
         self._lock       = threading.Lock()
         self._jobs_lock  = threading.Lock()
         self._jobs: Dict[str, Job] = {}
         self._max_jobs   = 100
+        self.worker_count = worker_count or _env_positive_int(
+            "IMAGE3D_WORKERS",
+            DEFAULT_WORKER_COUNT,
+        )
+        self.max_queue_size = max_queue_size or _env_positive_int(
+            "IMAGE3D_MAX_QUEUE_SIZE",
+            DEFAULT_MAX_QUEUE_SIZE,
+        )
+        self.job_timeout_seconds = job_timeout_seconds or _env_positive_int(
+            "IMAGE3D_JOB_TIMEOUT_SECONDS",
+            DEFAULT_JOB_TIMEOUT_SECONDS,
+        )
+        self._queue: queue.Queue[tuple[str, bytes, dict]] = queue.Queue(
+            maxsize=self.max_queue_size
+        )
+        self._workers: list[threading.Thread] = []
+        self._submission_keys: dict[str, str] = {}
         self.output_retention_days = _env_positive_int(
             "IMAGE3D_OUTPUT_RETENTION_DAYS",
             DEFAULT_OUTPUT_RETENTION_DAYS,
@@ -251,6 +403,8 @@ class ModelService:
         )
         self.device      = None
         self.device_name = "not loaded"
+        if start_workers:
+            self._start_workers()
 
     def _load(self):
         if self._model is not None:
@@ -258,7 +412,7 @@ class ModelService:
 
         _setup_runtime_libs()
 
-        import sys, torch
+        import torch
 
         self.device, self.device_name = _get_device()
 
@@ -305,17 +459,67 @@ class ModelService:
 
     def get_job(self, job_id: str) -> Optional[Job]:
         with self._jobs_lock:
+            self._refresh_queue_positions_locked()
             return self._jobs.get(job_id)
 
     def submit(self, image_bytes: bytes, params: dict) -> str:
+        submission_key = self._submission_key(image_bytes, params)
+        with self._jobs_lock:
+            existing_id = self._active_duplicate_job_id_locked(submission_key)
+            if existing_id:
+                existing = self._jobs[existing_id]
+                duplicate_count = existing.diagnostics.get("duplicate_submissions", 0) + 1
+                existing.diagnostics["duplicate_submissions"] = duplicate_count
+                existing.touch()
+                return existing_id
+
         job_id = str(uuid.uuid4())
-        job    = Job(job_id, settings=params)
+        job    = Job(
+            job_id,
+            settings=params,
+            timeout_seconds=self.job_timeout_seconds,
+            submission_key=submission_key,
+        )
         job.diagnostics["request"] = params
         with self._jobs_lock:
             self._prune_jobs_locked()
             self._jobs[job_id] = job
-        threading.Thread(target=self._run, args=(job, image_bytes, params), daemon=True).start()
+            self._submission_keys[submission_key] = job_id
+        try:
+            self._queue.put_nowait((job_id, image_bytes, params))
+        except queue.Full as exc:
+            with self._jobs_lock:
+                self._jobs.pop(job_id, None)
+                if self._submission_keys.get(submission_key) == job_id:
+                    self._submission_keys.pop(submission_key, None)
+            raise JobQueueFull(self.max_queue_size) from exc
+        with self._jobs_lock:
+            self._refresh_queue_positions_locked()
         return job_id
+
+    def cancel_job(self, job_id: str) -> Optional[Job]:
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.status in {"done", "error", "cancelled"}:
+                return job
+            job.cancel_requested = True
+            if job.status == "pending":
+                self._remove_queued_job_locked(job_id)
+                job.status = "cancelled"
+                job.progress = 0
+                job.step = "Cancelled"
+                job.error = None
+                job.cancelled_at = time.time()
+                job.completed_at = job.cancelled_at
+                job.queue_position = None
+                self._drop_submission_key_locked(job)
+            else:
+                job.step = "Cancelling..."
+            job.touch()
+            self._refresh_queue_positions_locked()
+            return job
 
     def prepare_preview(self, image_bytes: bytes, params: dict) -> dict:
         preview_id = f"preview_{uuid.uuid4().hex[:12]}"
@@ -341,8 +545,146 @@ class ModelService:
             },
         }
 
+    def preflight(self) -> dict:
+        source_ref = _triposr_ref()
+        source_ready = _triposr_source_valid(MODELS_DIR / "_triposr_src") and _source_ref_matches(
+            MODELS_DIR / "_triposr_src",
+            source_ref,
+        )
+        weights_ready = _weights_cache_valid(MODELS_DIR / "triposr")
+        return {
+            "python": {
+                "version": sys.version.split()[0],
+                "executable": sys.executable,
+            },
+            "storage": self._storage_preflight(),
+            "torch": self._torch_preflight(),
+            "cache": {
+                "triposr_source": {
+                    "ready": source_ready,
+                    "ref": source_ref,
+                    "path": str(MODELS_DIR / "_triposr_src"),
+                },
+                "triposr_weights": {
+                    "ready": weights_ready,
+                    "path": str(MODELS_DIR / "triposr"),
+                    "minimum_model_bytes": MIN_MODEL_CKPT_BYTES,
+                },
+            },
+            "setup": {
+                "offline": _offline_mode(),
+                "network_required": not (source_ready and weights_ready),
+                "warmup_command": "uv run --no-sync python -m api.main --warmup",
+            },
+            "queue": {
+                "worker_count": self.worker_count,
+                "max_queue_size": self.max_queue_size,
+                "job_timeout_seconds": self.job_timeout_seconds,
+            },
+        }
+
+    def warmup(self) -> dict:
+        self._load()
+        return self.preflight()
+
+    def _storage_preflight(self) -> dict:
+        _ensure_storage_dirs()
+        result = {
+            "base_dir": str(_BASE),
+            "models_dir": str(MODELS_DIR),
+            "outputs_dir": str(OUTPUTS_DIR),
+            "previews_dir": str(PREVIEWS_DIR),
+            "writable": False,
+            "free_bytes": None,
+            "error": None,
+        }
+        probe = _BASE / ".image3d_write_test"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            result["writable"] = True
+            result["free_bytes"] = shutil.disk_usage(_BASE).free
+        except OSError as exc:
+            result["error"] = str(exc)
+        return result
+
+    def _torch_preflight(self) -> dict:
+        _setup_runtime_libs()
+        try:
+            import torch
+        except Exception as exc:
+            return {
+                "installed": False,
+                "error": str(exc),
+            }
+
+        cuda_available = bool(torch.cuda.is_available())
+        hip_version = getattr(torch.version, "hip", None)
+        info = {
+            "installed": True,
+            "version": getattr(torch, "__version__", None),
+            "cuda_available": cuda_available,
+            "hip_version": hip_version,
+            "backend": "cpu",
+            "devices": [],
+        }
+        if cuda_available:
+            info["backend"] = "rocm" if hip_version else "cuda"
+            for index in range(torch.cuda.device_count()):
+                try:
+                    props = torch.cuda.get_device_properties(index)
+                    info["devices"].append(
+                        {
+                            "index": index,
+                            "name": props.name,
+                            "total_memory_bytes": props.total_memory,
+                        }
+                    )
+                except Exception as exc:
+                    info["devices"].append({"index": index, "error": str(exc)})
+        return info
+
+    def _start_workers(self):
+        for index in range(self.worker_count):
+            worker = threading.Thread(
+                target=self._worker_loop,
+                name=f"image3d-worker-{index + 1}",
+                daemon=True,
+            )
+            worker.start()
+            self._workers.append(worker)
+
+    def _worker_loop(self):
+        while True:
+            job_id, image_bytes, params = self._queue.get()
+            try:
+                with self._jobs_lock:
+                    job = self._jobs.get(job_id)
+                    if job is None:
+                        self._refresh_queue_positions_locked()
+                        continue
+                    if job.cancel_requested or job.status == "cancelled":
+                        self._refresh_queue_positions_locked()
+                        continue
+                    job.status = "running"
+                    job.started_at = time.time()
+                    job.started_monotonic = time.monotonic()
+                    job.queue_position = None
+                    job.touch()
+                    self._refresh_queue_positions_locked()
+                self._run(job, image_bytes, params)
+            finally:
+                with self._jobs_lock:
+                    self._expire_submission_keys_locked()
+                    self._refresh_queue_positions_locked()
+                self._queue.task_done()
+
     def _run(self, job: Job, image_bytes: bytes, params: dict):
         job.status = "running"
+        if job.started_at is None:
+            job.started_at = time.time()
+        if job.started_monotonic is None:
+            job.started_monotonic = time.monotonic()
         job.touch()
         try:
             import torch
@@ -407,6 +749,10 @@ class ModelService:
 
             self._export_mesh(job, mesh, params)
 
+        except JobCancelled:
+            self._mark_cancelled(job)
+        except JobTimeout:
+            self._mark_timed_out(job)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -420,6 +766,9 @@ class ModelService:
             job.diagnostics["timings"] = job.stage_timings
             job.completed_at = time.time()
             job.touch()
+        finally:
+            with self._jobs_lock:
+                self._drop_submission_key_locked(job)
 
     def _preprocess(
         self,
@@ -444,6 +793,7 @@ class ModelService:
         )
 
     def _start_stage(self, job: Job, name: str, progress: int, step: str) -> float:
+        self._raise_if_cancelled_or_timed_out(job)
         job.progress, job.step = progress, step
         job.stage_timings.setdefault(name, {"started_at": time.time()})
         job.diagnostics["timings"] = job.stage_timings
@@ -456,6 +806,38 @@ class ModelService:
         timing["duration_seconds"] = round(elapsed, 3)
         timing["completed_at"] = time.time()
         job.diagnostics["timings"] = job.stage_timings
+        job.touch()
+        self._raise_if_cancelled_or_timed_out(job)
+
+    def _raise_if_cancelled_or_timed_out(self, job: Job):
+        if job.cancel_requested:
+            raise JobCancelled()
+        timeout_seconds = job.timeout_seconds
+        started = job.started_monotonic
+        if timeout_seconds and started is not None:
+            if time.monotonic() - started > timeout_seconds:
+                raise JobTimeout()
+
+    def _mark_cancelled(self, job: Job):
+        job.status = "cancelled"
+        job.error = None
+        job.step = "Cancelled"
+        job.cancel_requested = True
+        job.cancelled_at = time.time()
+        job.completed_at = job.cancelled_at
+        job.diagnostics["timings"] = job.stage_timings
+        job.touch()
+
+    def _mark_timed_out(self, job: Job):
+        job.status = "error"
+        job.error = "Generation timed out."
+        job.step = "Timed out"
+        job.diagnostics["error"] = {
+            "type": "JobTimeout",
+            "message": f"Generation exceeded {job.timeout_seconds} seconds",
+        }
+        job.diagnostics["timings"] = job.stage_timings
+        job.completed_at = time.time()
         job.touch()
 
     def _mesh_diagnostics(self, mesh) -> dict:
@@ -943,6 +1325,79 @@ class ModelService:
             "error": str(exc),
         }
 
+    def _submission_key(self, image_bytes: bytes, params: dict) -> str:
+        normalized_params = json.dumps(
+            params,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        digest = hashlib.sha256()
+        digest.update(image_bytes)
+        digest.update(b"\0")
+        digest.update(normalized_params)
+        return digest.hexdigest()
+
+    def _active_duplicate_job_id_locked(self, submission_key: str) -> str | None:
+        job_id = self._submission_keys.get(submission_key)
+        if not job_id:
+            return None
+        job = self._jobs.get(job_id)
+        if job is None:
+            self._submission_keys.pop(submission_key, None)
+            return None
+        if job.status in {"pending", "running"}:
+            return job_id
+        self._submission_keys.pop(submission_key, None)
+        return None
+
+    def _drop_submission_key_locked(self, job: Job):
+        if job.submission_key and self._submission_keys.get(job.submission_key) == job.job_id:
+            self._submission_keys.pop(job.submission_key, None)
+
+    def _expire_submission_keys_locked(self):
+        for submission_key, job_id in list(self._submission_keys.items()):
+            job = self._jobs.get(job_id)
+            if job is None or job.status not in {"pending", "running"}:
+                self._submission_keys.pop(submission_key, None)
+
+    def _queued_job_ids(self) -> list[str]:
+        with self._queue.mutex:
+            return [
+                item[0]
+                for item in list(self._queue.queue)
+                if isinstance(item, tuple) and item
+            ]
+
+    def _remove_queued_job_locked(self, job_id: str) -> bool:
+        with self._queue.mutex:
+            for index, item in enumerate(list(self._queue.queue)):
+                if not isinstance(item, tuple) or not item or item[0] != job_id:
+                    continue
+                del self._queue.queue[index]
+                if self._queue.unfinished_tasks > 0:
+                    self._queue.unfinished_tasks -= 1
+                    if self._queue.unfinished_tasks == 0:
+                        self._queue.all_tasks_done.notify_all()
+                self._queue.not_full.notify()
+                return True
+        return False
+
+    def _refresh_queue_positions_locked(self):
+        for job in self._jobs.values():
+            if job.status == "pending":
+                job.queue_position = None
+
+        position = 1
+        for job_id in self._queued_job_ids():
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "pending" or job.cancel_requested:
+                continue
+            job.queue_position = position
+            job.step = f"Queued ({position})"
+            job.touch()
+            position += 1
+
     def _prune_jobs_locked(self):
         if len(self._jobs) < self._max_jobs:
             return
@@ -953,11 +1408,13 @@ class ModelService:
                 job_id,
             )
             for job_id, job in self._jobs.items()
-            if job.status in {"done", "error"}
+            if job.status in {"done", "error", "cancelled"}
         )
         remove_count = len(self._jobs) - self._max_jobs + 1
         for _, job_id in finished[:remove_count]:
-            self._jobs.pop(job_id, None)
+            job = self._jobs.pop(job_id, None)
+            if job:
+                self._drop_submission_key_locked(job)
 
 
 model_service = ModelService()
